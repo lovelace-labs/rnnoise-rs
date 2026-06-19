@@ -72,8 +72,8 @@ It depends what you measure:
 |---|---|---|
 | Parameters | ~215 K | ~2.9 M |
 | Denoising quality | good | **much better** (newer model) |
-| Per-frame cost | ~32 µs | ~316 µs |
-| Real-time factor | ~300× | ~32× |
+| Per-frame cost | ~32 µs | ~316 µs float / **~105 µs int8** |
+| Real-time factor | ~300× | ~32× float / **~95× int8** |
 
 The current model is ~13× larger, so it cannot match the tiny old model on raw
 throughput — **no** faithful port of current RNNoise can. What `rnnoise-rs`
@@ -81,13 +81,13 @@ delivers is the much higher **quality** of the modern model, implemented faster
 than the official C library, and still comfortably real-time (32× on one core).
 See [BENCHMARKS.md](BENCHMARKS.md) for the full comparison and a speed-up study.
 
-### Smaller footprint (int8)
+### Faster + smaller (int8 + `sdot`)
 
-`RnnModel::quantized()` returns an int8 version of the model: ~4× smaller weight
-footprint (≈11.5 MB → ≈2.9 MB) with near-identical output (rel. energy `3.9e-6`
-vs the float model). It is **not** bit-exact and, on wide-bandwidth CPUs like
-Apple Silicon, not faster (this workload is compute-bound, not bandwidth-bound —
-see BENCHMARKS.md). Use it to cut memory, e.g. with many concurrent streams:
+`RnnModel::quantized()` returns an int8 version of the model: **~3× faster**
+(105 µs/frame, ~95× real time — via ARM `sdot` 4-MAC int8 dot products) and **~4×
+smaller** (≈11.5 MB → ≈2.9 MB), with near-identical output (rel. energy `4.8e-6`
+vs the float model). It is **not** bit-exact, so the float model stays the
+default; opt in when you want speed/size and can accept imperceptible error:
 
 ```rust
 use std::sync::Arc;
@@ -95,6 +95,35 @@ use rnnoise::{DenoiseState, RnnModel};
 let model = Arc::new(RnnModel::default().quantized());
 let mut st = DenoiseState::with_model(model);
 ```
+
+On aarch64 with the `dotprod` CPU feature this uses an inline-asm `sdot` kernel;
+elsewhere it falls back to a portable scalar dot product (identical results, see
+[BENCHMARKS.md](BENCHMARKS.md)).
+
+### Legacy (original 2018) model
+
+For the smaller, faster, lower-quality original RNNoise model (22 bands,
+~215 K params — the one `nnnoiseless` uses), enable the `legacy-model` feature
+and use `DenoiseStateV1` (same API):
+
+```toml
+rnnoise-rs = { version = "0.1", features = ["legacy-model"] }
+```
+
+```rust
+# #[cfg(feature = "legacy-model")] {
+use rnnoise::{DenoiseStateV1, FRAME_SIZE};
+let mut st = DenoiseStateV1::new();
+let mut out = [0.0f32; FRAME_SIZE];
+st.process_frame(&mut out, &[0.0f32; FRAME_SIZE]);
+# }
+```
+
+It matches the old model to ~1 LSB (rel. energy `1.1e-7`). It runs ~261× real
+time (≈38 µs/frame); its **neural net is as fast as nnnoiseless's** (9.3 vs
+9.8 µs) — the remaining gap is our front-end FFT (we reuse the complex KISS-FFT
+rather than a real-input FFT). See [BENCHMARKS.md](BENCHMARKS.md). Use the
+default (current) model for quality; use this for minimal size/latency.
 
 ## How it works
 

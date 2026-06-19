@@ -93,9 +93,15 @@ impl KissFft {
     /// applies the bit-reversal permutation into `fout`, then runs the
     /// in-place butterflies. `fin` and `fout` must both have length `nfft`.
     pub fn forward(&self, fin: &[Cpx], fout: &mut [Cpx]) {
+        self.forward_scaled(fin, fout, self.scale);
+    }
+
+    /// As [`KissFft::forward`] but with a caller-chosen input scale, so the
+    /// output is `scale · DFT(fin)`. Used by the legacy model, which normalises
+    /// by the window energy (`wnorm`) rather than `1/nfft`.
+    pub fn forward_scaled(&self, fin: &[Cpx], fout: &mut [Cpx], scale: f32) {
         debug_assert_eq!(fin.len(), self.nfft);
         debug_assert_eq!(fout.len(), self.nfft);
-        let scale = self.scale;
         for i in 0..self.nfft {
             let x = fin[i];
             let dst = self.bitrev[i] as usize;
@@ -186,6 +192,88 @@ impl KissFft {
                 p => unreachable!("unsupported radix {p}"),
             }
             m = m2;
+        }
+    }
+}
+
+/// Real-input FFT for even `n`, built on a half-size complex FFT (the standard
+/// "pack reals into a complex array of half the length, then split" trick).
+/// Roughly halves the work versus a full complex transform of real data.
+///
+/// [`RealFft::forward`] returns the unnormalized `DFT_n(r)` in `n/2 + 1` bins;
+/// [`RealFft::inverse`] returns the unnormalized inverse (`Σ_k R[k] e^{+2πikn/N}`,
+/// i.e. `n ×` the true inverse) — the same conventions the legacy model already
+/// applies `wnorm`/`0.5` scaling around.
+pub struct RealFft {
+    m: usize, // n/2
+    sub: KissFft,
+    /// `tw[k] = exp(-2πi k / n)` for `k in 0..m`.
+    tw: Vec<Cpx>,
+}
+
+impl RealFft {
+    pub fn new(n: usize) -> Self {
+        assert!(n % 2 == 0, "RealFft needs even n");
+        let m = n / 2;
+        let mut tw = vec![Cpx::default(); m];
+        let pi = std::f64::consts::PI;
+        for (k, t) in tw.iter_mut().enumerate() {
+            let phase = -2.0 * pi * k as f64 / n as f64;
+            t.r = phase.cos() as f32;
+            t.i = phase.sin() as f32;
+        }
+        RealFft { m, sub: KissFft::new(m), tw }
+    }
+
+    /// `out` has length `m + 1`; `r` has length `2*m`.
+    pub fn forward(&self, r: &[f32], out: &mut [Cpx]) {
+        let m = self.m;
+        let mut z = vec![Cpx::default(); m];
+        for k in 0..m {
+            z[k] = Cpx::new(r[2 * k], r[2 * k + 1]);
+        }
+        let mut zf = vec![Cpx::default(); m];
+        self.sub.forward_scaled(&z, &mut zf, 1.0);
+
+        out[0] = Cpx::new(zf[0].r + zf[0].i, 0.0);
+        out[m] = Cpx::new(zf[0].r - zf[0].i, 0.0);
+        for k in 1..m {
+            let p = zf[k];
+            let q = Cpx::new(zf[m - k].r, -zf[m - k].i); // conj(Z[m-k])
+            let even = Cpx::new((p.r + q.r) * 0.5, (p.i + q.i) * 0.5);
+            let diff = Cpx::new((p.r - q.r) * 0.5, (p.i - q.i) * 0.5);
+            let odd = Cpx::new(diff.i, -diff.r); // diff * (-i)
+            let wo = c_mul(self.tw[k], odd);
+            out[k] = c_add(even, wo);
+        }
+    }
+
+    /// `spec` has length `m + 1`; `out` has length `2*m`.
+    pub fn inverse(&self, spec: &[Cpx], out: &mut [f32]) {
+        let m = self.m;
+        let mut z = vec![Cpx::default(); m];
+        z[0] = Cpx::new((spec[0].r + spec[m].r) * 0.5, (spec[0].r - spec[m].r) * 0.5);
+        for k in 1..m {
+            let rk = spec[k];
+            let rmk = Cpx::new(spec[m - k].r, -spec[m - k].i); // conj(spec[m-k])
+            let sum = c_add(rk, rmk);
+            let dif = c_sub(rk, rmk);
+            let wc = Cpx::new(self.tw[k].r, -self.tw[k].i); // conj(w)
+            let t = c_mul(wc, dif);
+            let it = Cpx::new(-t.i, t.r); // i * t
+            z[k] = Cpx::new((sum.r + it.r) * 0.5, (sum.i + it.i) * 0.5);
+        }
+        // unnormalized IDFT_m(z) = conj(DFT_m(conj(z)))
+        for c in z.iter_mut() {
+            c.i = -c.i;
+        }
+        let mut zf = vec![Cpx::default(); m];
+        self.sub.forward_scaled(&z, &mut zf, 1.0);
+        // The half-size route yields 0.5× the unnormalized inverse; scale to match
+        // `Σ_k R[k] e^{+2πikn/N}` (round-trip = n·r).
+        for k in 0..m {
+            out[2 * k] = 2.0 * zf[k].r;
+            out[2 * k + 1] = -2.0 * zf[k].i;
         }
     }
 }
@@ -462,5 +550,66 @@ mod tests {
         assert!(kf_factor(960, &mut fac));
         // 960 = 5 * 3 * 4 * 4 * 4 (processing order)
         assert_eq!(&fac[0..10], &[5, 192, 3, 64, 4, 16, 4, 4, 4, 1]);
+    }
+
+    #[test]
+    fn real_fft_matches_dft_and_round_trips() {
+        let n = 960usize;
+        let m = n / 2;
+        let rfft = RealFft::new(n);
+        let mut state = 99u32;
+        let mut next = || {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            (state >> 8) as f32 / 16_777_216.0 - 0.5
+        };
+        let r: Vec<f32> = (0..n).map(|_| next()).collect();
+
+        // forward vs naive DFT_n
+        let mut spec = vec![Cpx::default(); m + 1];
+        rfft.forward(&r, &mut spec);
+        let mut max_err = 0.0f32;
+        for j in 0..=m {
+            let mut acc = Cpx::default();
+            for (k, &x) in r.iter().enumerate() {
+                let ph = -2.0 * std::f64::consts::PI * (j * k) as f64 / n as f64;
+                let (s, c) = ph.sin_cos();
+                acc.r += x * c as f32;
+                acc.i += x * s as f32;
+            }
+            max_err = max_err.max((spec[j].r - acc.r).abs()).max((spec[j].i - acc.i).abs());
+        }
+        assert!(max_err < 2e-3, "rfft vs DFT err {max_err}");
+
+        // inverse round-trip: irfft(rfft(r)) == n * r
+        let mut back = vec![0.0f32; n];
+        rfft.inverse(&spec, &mut back);
+        let mut rt = 0.0f32;
+        for k in 0..n {
+            rt = rt.max((back[k] - n as f32 * r[k]).abs());
+        }
+        assert!(rt < 1.0, "irfft round-trip err {rt} (expected n*r)");
+    }
+
+    // `cargo test --release fft_timing -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn fft_timing() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        for n in [960usize, 480] {
+            let fft = KissFft::new(n);
+            let inp = vec![Cpx::new(0.3, -0.1); n];
+            let mut out = vec![Cpx::default(); n];
+            for _ in 0..2000 {
+                fft.forward(&inp, &mut out);
+            }
+            let iters = 200_000;
+            let t = Instant::now();
+            for _ in 0..iters {
+                fft.forward(black_box(&inp), black_box(&mut out));
+            }
+            let ns = t.elapsed().as_nanos() as f64 / iters as f64;
+            println!("complex FFT n={n}: {:.3} µs", ns / 1000.0);
+        }
     }
 }

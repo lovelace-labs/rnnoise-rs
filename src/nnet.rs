@@ -61,7 +61,9 @@ const MAX_CONV_INPUTS: usize = 384;
 const MAX_GRU_3N: usize = 1152;
 
 /// Weight storage for a layer: full-precision float (bit-exact default) or an
-/// opt-in int8 quantization with a per-output scale (~4× less memory traffic).
+/// opt-in int8 quantization. The int8 form is a **transposed, dense**
+/// `[output][input]` matrix with a per-output scale, which lets each output be a
+/// contiguous int8 dot product — ideal for the NEON `sdot` path.
 pub(crate) enum Weights {
     Float(Vec<f32>),
     Q8 { w: Vec<i8>, scale: Vec<f32> },
@@ -89,8 +91,7 @@ impl LinearLayer {
         match (&self.weights, &self.weights_idx) {
             (Weights::Float(w), Some(idx)) => sparse_sgemv8x4(out, w, idx, n, input),
             (Weights::Float(w), None) => dense_sgemv(out, w, m, n, input),
-            (Weights::Q8 { w, scale }, Some(idx)) => sparse_cgemv8x4(out, w, scale, idx, n, input),
-            (Weights::Q8 { w, scale }, None) => dense_cgemv(out, w, scale, m, n, input),
+            (Weights::Q8 { w, scale }, _) => dense_q8(out, w, scale, m, n, input),
         }
         for i in 0..n {
             out[i] += self.bias[i];
@@ -106,59 +107,51 @@ impl LinearLayer {
         }
     }
 
-    /// Replace float weights with an int8 quantization (per-output scale).
-    /// No-op if already quantized. Used by [`crate::RnnModel::quantized`].
+    /// Replace float weights with an int8 quantization. No-op if already
+    /// quantized. Used by [`crate::RnnModel::quantized`].
     pub(crate) fn quantize(&mut self) {
         let Weights::Float(w) = &self.weights else {
             return;
         };
         let (n, m) = (self.nb_outputs, self.nb_inputs);
-        let mut scale = vec![0.0f32; n];
-        let mut q = vec![0i8; w.len()];
+
+        // Reconstruct a dense `[output][input]` float matrix. The shipped model
+        // is dense whether stored row-major (`[input][output]`) or in sparse
+        // 8×4 blocks, so this just transposes / un-blocks it.
+        let mut dense = vec![0.0f32; n * m];
         match &self.weights_idx {
             None => {
-                // Dense: per output column i, scale by max_j |W[j*N+i]|.
-                for i in 0..n {
-                    let mut mx = 0.0f32;
+                for o in 0..n {
                     for j in 0..m {
-                        mx = mx.max(w[j * n + i].abs());
-                    }
-                    scale[i] = mx / 127.0;
-                }
-                for i in 0..n {
-                    let s = scale[i];
-                    if s > 0.0 {
-                        for j in 0..m {
-                            q[j * n + i] = quant(w[j * n + i] / s);
-                        }
+                        dense[o * m + j] = w[j * n + o];
                     }
                 }
             }
             Some(idx) => {
-                // Sparse 8×4 blocks: row r of a group maps to output (base+r).
-                for_each_block(idx, n, |base, _pos, wi| {
+                for_each_block(idx, n, |base, pos, wi| {
                     for c in 0..4 {
                         for r in 0..SPARSE_ROWS {
-                            let a = w[wi + c * 8 + r].abs();
-                            if a > scale[base + r] {
-                                scale[base + r] = a;
-                            }
+                            dense[(base + r) * m + (pos + c)] = w[wi + c * 8 + r];
                         }
                     }
                 });
-                for s in scale.iter_mut() {
-                    *s /= 127.0;
+            }
+        }
+
+        // Per-output symmetric quantization. The scale folds in *both* the
+        // weight scale (max/127) and the activation scale (1/127), so the
+        // runtime is `out[o] = scale[o] * Σ q_w·q_x` with an int32 dot product.
+        let mut scale = vec![0.0f32; n];
+        let mut q = vec![0i8; n * m];
+        for o in 0..n {
+            let row = &dense[o * m..o * m + m];
+            let mx = row.iter().fold(0.0f32, |a, &v| a.max(v.abs()));
+            scale[o] = mx / (127.0 * 127.0);
+            if mx > 0.0 {
+                let inv = 127.0 / mx;
+                for (qi, &v) in q[o * m..o * m + m].iter_mut().zip(row) {
+                    *qi = quant(v * inv);
                 }
-                for_each_block(idx, n, |base, _pos, wi| {
-                    for c in 0..4 {
-                        for r in 0..SPARSE_ROWS {
-                            let s = scale[base + r];
-                            if s > 0.0 {
-                                q[wi + c * 8 + r] = quant(w[wi + c * 8 + r] / s);
-                            }
-                        }
-                    }
-                });
             }
         }
         self.weights = Weights::Q8 { w: q, scale };
@@ -168,6 +161,14 @@ impl LinearLayer {
 #[inline]
 fn quant(x: f32) -> i8 {
     (x.round() as i32).clamp(-127, 127) as i8
+}
+
+/// Quantize an activation to int8: `floor(0.5 + 127·x)` clamped, matching the
+/// C int8 path. Inputs to quantized layers are tanh/sigmoid/GRU outputs in
+/// `[-1, 1]`, so this never overflows in practice.
+#[inline]
+fn quant_x(x: f32) -> i8 {
+    ((0.5 + 127.0 * x).floor() as i32).clamp(-127, 127) as i8
 }
 
 /// Walk the sparse 8×4 index structure, calling `f(group_base, pos, weight_off)`
@@ -204,19 +205,84 @@ fn dense_sgemv(out: &mut [f32], w: &[f32], m: usize, n: usize, input: &[f32]) {
     }
 }
 
-/// int8 dense GEMV: accumulate `q·x` in f32, then apply the per-output scale.
-fn dense_cgemv(out: &mut [f32], w: &[i8], scale: &[f32], m: usize, n: usize, input: &[f32]) {
-    for v in out.iter_mut() {
-        *v = 0.0;
+/// Largest input width of a quantized layer (conv2 and the GRUs are all 384).
+const MAX_Q8_INPUTS: usize = 384;
+
+/// int8 dense GEMV: quantize the activations, then `out[o] = scale[o] · (q_w[o] · q_x)`
+/// with an int32 dot product (NEON `sdot` when available, scalar otherwise — both
+/// give the exact same integer result, so output is independent of the path).
+fn dense_q8(out: &mut [f32], w: &[i8], scale: &[f32], m: usize, n: usize, input: &[f32]) {
+    let mut qx = [0i8; MAX_Q8_INPUTS];
+    for (q, &x) in qx[..m].iter_mut().zip(&input[..m]) {
+        *q = quant_x(x);
     }
-    for (j, &xj) in input[..m].iter().enumerate() {
-        let row = &w[j * n..j * n + n];
-        for (o, &wv) in out.iter_mut().zip(row.iter()) {
-            *o += wv as f32 * xj;
+    let qx = &qx[..m];
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        if std::arch::is_aarch64_feature_detected!("dotprod") {
+            // SAFETY: guarded by runtime detection of the `dotprod` feature.
+            unsafe { dense_q8_neon(out, w, scale, m, n, qx) };
+            return;
         }
     }
-    for (o, &s) in out.iter_mut().zip(scale.iter()) {
-        *o *= s;
+    dense_q8_scalar(out, w, scale, m, n, qx);
+}
+
+fn dense_q8_scalar(out: &mut [f32], w: &[i8], scale: &[f32], m: usize, n: usize, qx: &[i8]) {
+    for o in 0..n {
+        let row = &w[o * m..o * m + m];
+        let mut acc = 0i32;
+        for (&wv, &xv) in row.iter().zip(qx) {
+            acc += wv as i32 * xv as i32;
+        }
+        out[o] = acc as f32 * scale[o];
+    }
+}
+
+/// Single `sdot` (signed int8 dot-product, 4 MACs/lane) via inline asm — the
+/// `vdotq_s32` intrinsic is still unstable on stable Rust, but the instruction
+/// is reachable directly. Requires the `dotprod` target feature.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "dotprod")]
+#[inline]
+unsafe fn sdot(
+    acc: core::arch::aarch64::int32x4_t,
+    a: core::arch::aarch64::int8x16_t,
+    b: core::arch::aarch64::int8x16_t,
+) -> core::arch::aarch64::int32x4_t {
+    let mut acc = acc;
+    core::arch::asm!(
+        "sdot {acc:v}.4s, {a:v}.16b, {b:v}.16b",
+        acc = inout(vreg) acc,
+        a = in(vreg) a,
+        b = in(vreg) b,
+        options(pure, nomem, nostack),
+    );
+    acc
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "dotprod")]
+unsafe fn dense_q8_neon(out: &mut [f32], w: &[i8], scale: &[f32], m: usize, n: usize, qx: &[i8]) {
+    use core::arch::aarch64::*;
+    let nchunks = m / 16;
+    for o in 0..n {
+        let row = w.as_ptr().add(o * m);
+        let mut acc = vdupq_n_s32(0);
+        let mut k = 0usize;
+        for _ in 0..nchunks {
+            let wv = vld1q_s8(row.add(k));
+            let xv = vld1q_s8(qx.as_ptr().add(k));
+            acc = sdot(acc, wv, xv);
+            k += 16;
+        }
+        let mut sum = vaddvq_s32(acc);
+        while k < m {
+            sum += *row.add(k) as i32 * qx[k] as i32;
+            k += 1;
+        }
+        out[o] = sum as f32 * scale[o];
     }
 }
 
@@ -246,40 +312,6 @@ fn sparse_sgemv8x4(out: &mut [f32], w: &[f32], idx: &[i32], rows: usize, x: &[f3
             wi += 32;
         }
         i += SPARSE_ROWS;
-    }
-}
-
-/// int8 variant of the sparse 8×4 GEMV: accumulate `q·x` in f32, then apply the
-/// per-output scale. Reads ¼ the weight bytes of the float path.
-fn sparse_cgemv8x4(out: &mut [f32], w: &[i8], scale: &[f32], idx: &[i32], rows: usize, x: &[f32]) {
-    for v in out.iter_mut() {
-        *v = 0.0;
-    }
-    let mut wi = 0usize;
-    let mut ii = 0usize;
-    let mut i = 0usize;
-    while i < rows {
-        let cols = idx[ii] as usize;
-        ii += 1;
-        let out8 = &mut out[i..i + SPARSE_ROWS];
-        for _ in 0..cols {
-            let pos = idx[ii] as usize;
-            ii += 1;
-            let xs = &x[pos..pos + 4];
-            let (xj0, xj1, xj2, xj3) = (xs[0], xs[1], xs[2], xs[3]);
-            let wb = &w[wi..wi + 32];
-            for r in 0..SPARSE_ROWS {
-                out8[r] += wb[r] as f32 * xj0
-                    + wb[8 + r] as f32 * xj1
-                    + wb[16 + r] as f32 * xj2
-                    + wb[24 + r] as f32 * xj3;
-            }
-            wi += 32;
-        }
-        i += SPARSE_ROWS;
-    }
-    for (o, &s) in out.iter_mut().zip(scale.iter()) {
-        *o *= s;
     }
 }
 
@@ -445,5 +477,29 @@ mod tests {
         assert!((sigmoid_approx(0.0) - 0.5).abs() < 1e-6);
         assert!(tanh_approx(100.0) <= 1.0 && tanh_approx(100.0) > 0.999);
         assert!(tanh_approx(-100.0) >= -1.0 && tanh_approx(-100.0) < -0.999);
+    }
+
+    // The `sdot` inline-asm path must produce exactly the same result as the
+    // portable scalar dot product (both are exact int32 arithmetic).
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn sdot_matches_scalar() {
+        if !std::arch::is_aarch64_feature_detected!("dotprod") {
+            return;
+        }
+        let (m, n) = (384usize, 70usize);
+        let mut s = 7u32;
+        let mut next = || {
+            s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+            (s >> 24) as i32 as i8
+        };
+        let w: Vec<i8> = (0..n * m).map(|_| next()).collect();
+        let qx: Vec<i8> = (0..m).map(|_| next()).collect();
+        let scale: Vec<f32> = (0..n).map(|i| (i as f32 + 1.0) * 1e-4).collect();
+        let mut a = vec![0.0f32; n];
+        let mut b = vec![0.0f32; n];
+        dense_q8_scalar(&mut a, &w, &scale, m, n, &qx);
+        unsafe { dense_q8_neon(&mut b, &w, &scale, m, n, &qx) };
+        assert_eq!(a, b, "sdot asm path diverged from scalar");
     }
 }

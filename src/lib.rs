@@ -40,8 +40,16 @@ mod weights;
 #[cfg(feature = "capi")]
 pub mod capi;
 
+/// The original (2018) RNNoise model — smaller and faster, lower quality.
+/// Enable with the `legacy-model` feature.
+#[cfg(feature = "legacy-model")]
+pub mod legacy;
+
 pub use denoise::DenoiseState;
 pub use weights::{ModelError, RnnModel};
+
+#[cfg(feature = "legacy-model")]
+pub use legacy::{DenoiseStateV1, RnnModelV1};
 
 /// Number of samples consumed/produced per [`DenoiseState::process_frame`] call.
 pub const FRAME_SIZE: usize = 480;

@@ -85,4 +85,34 @@ fn main() {
         (FRAME_SIZE as f64 / 48_000.0) / (qfull / 1e9),
         full / qfull
     );
+
+    #[cfg(feature = "legacy-model")]
+    {
+        use rnnoise::DenoiseStateV1;
+        let run = |frame: &[f32; FRAME_SIZE]| -> f64 {
+            let mut st = DenoiseStateV1::new();
+            let mut out = [0.0f32; FRAME_SIZE];
+            for _ in 0..200 {
+                st.process_frame(&mut out, frame);
+            }
+            let start = Instant::now();
+            for _ in 0..iters {
+                st.process_frame(black_box(&mut out), black_box(frame));
+            }
+            start.elapsed().as_nanos() as f64 / iters as f64
+        };
+        println!("\nrnnoise-rs (legacy / old model) per-frame:");
+        let lfull = run(&active);
+        let lfront = run(&silent);
+        let rtf = (FRAME_SIZE as f64 / 48_000.0) / (lfull / 1e9);
+        println!(
+            "  full (active)      {:>9.1} µs/frame   {rtf:.1}× real time",
+            lfull / 1000.0
+        );
+        println!("  front-end (silent) {:>9.1} µs/frame", lfront / 1000.0);
+        println!(
+            "  -> neural net ≈    {:>9.1} µs/frame",
+            (lfull - lfront) / 1000.0
+        );
+    }
 }

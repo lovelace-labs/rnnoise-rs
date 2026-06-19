@@ -61,15 +61,36 @@ ports the *old* (2018, 22-band, ~215 K param) model — we port the *new* (32-ba
 - [x] Public Rust API, C ABI (`capi`) + `include/rnnoise.h`, CLI demo, bench.
 - [x] README, LICENSE (BSD-3), CI workflow, rustdoc, API tests.
 
+## Benchmarks & speed-up study
+
+Full results in [BENCHMARKS.md](BENCHMARKS.md). Headline (Apple M4 Pro, 100 s audio):
+rnnoise-rs **3.13 s** vs C NEON 4.59 s vs C scalar 4.90 s (~1.5× faster, bit-exact);
+nnnoiseless 0.32 s (smaller/older model). The NN is 89 % of each frame and is
+**compute/load-bound, not bandwidth-bound**, on Apple Silicon.
+
+- [x] **int8 + `sdot` SIMD** (`RnnModel::quantized()`): transposed dense int8
+      layout + quantized activations + ARM `sdot` (inline asm; scalar fallback).
+      **Measured 4.0× on the NN, 3.0× overall (105 µs/frame, 95× RT)**, ~4× smaller,
+      near-identical output (rel. energy 4.8e-6). The naive i8→f32 dequant was
+      0.81× (slower) — the win is `sdot`'s instruction-count reduction, since the
+      model is compute/load-bound, not bandwidth-bound. Float stays the default.
+- [x] **Legacy (2018) model support** (`legacy-model` feature → `DenoiseStateV1`):
+      the old 22-band dense+3-GRU model. Bit-parity to within ~1 LSB (rel. 1.1e-7)
+      vs the old model; **38.4 µs/frame (261× RT)** — its NN (9.3 µs) matches
+      nnnoiseless's (9.8 µs); the gap is the front-end FFT.
+- [x] **Two-real-FFT front-end** (legacy): compute the signal + pitch-lagged
+      forward FFTs as one complex FFT (`z = x + i·p`) and split the spectrum.
+      Legacy 44.9 → 38.4 µs (~15 %), no parity loss. Remaining: real-input FFT
+      for the last forward + inverse.
+
 ## Future enhancements (not required for parity)
 
-- [ ] **int8 weight path** (`weights_blob` int8 + scales, `cgemv8x4`): ~4× less
-      memory traffic → meaningfully faster, near-identical output. Biggest
-      remaining speed lever (how upstream goes fast on AVX2).
-- [ ] Ship the **"little"/sparse** model + int8 blob behind features so the crate
-      fits the crates.io 10 MB limit (the default float blob is 11.3 MB).
-- [ ] Explicit NEON/AVX2 intrinsics for the GEMVs (auto-vectorization already
-      beats C here, so low priority).
+- [ ] **x86 int8 SIMD** (AVX-VNNI `vpdpbusd`): port the int8 dot kernel off ARM
+      (scalar fallback already works everywhere); same ~3–4× win as `sdot`.
+- [ ] **f16 weights + f16 SIMD** (~1.5–2× on ARM); less accuracy loss than int8.
+- [ ] Multi-thread the per-layer GEMVs across cores (best for offline/batch).
+- [ ] Tighten the front-end (real-input FFT) to close the ~10 µs gap to C.
+- [ ] Ship a pre-quantized int8 / "little" model blob behind a feature so the
+      crate fits the crates.io 10 MB limit (default float blob is 11.3 MB).
 - [ ] `cargo-c` packaging / pkg-config for the C ABI; optional WAV I/O in the CLI.
-- [ ] Big-endian support in the blob loader (currently little-endian, like
-      upstream's "machine endian" in practice).
+- [ ] Big-endian support in the blob loader (currently little-endian).

@@ -19,6 +19,9 @@ crate-type = ["lib", "staticlib", "cdylib"]
 default = []
 # Expose a C ABI matching rnnoise.h (DenoiseState / rnnoise_process_frame ...).
 capi = []
+# Also bundle the original (2018) RNNoise model: a smaller, faster, lower-quality
+# pipeline exposed as `DenoiseStateV1` (adds ~85 KB of embedded weights).
+legacy-model = []
 
 [dependencies]
 
