@@ -41,7 +41,11 @@ impl Common {
             }
         }
 
-        Common { half_window, dct_table, fft: KissFft::new(WINDOW_SIZE) }
+        Common {
+            half_window,
+            dct_table,
+            fft: KissFft::new(WINDOW_SIZE),
+        }
     }
 
     /// Type-II-ish DCT used for cepstral features (`dct` in `denoise.c`).
@@ -108,9 +112,7 @@ pub(crate) fn compute_band_energy(band_e: &mut [f32], x: &[Cpx]) {
     }
     sum[1] = (sum[0] + sum[1]) * 2.0 / 3.0;
     sum[NB_BANDS] = (sum[NB_BANDS] + sum[NB_BANDS + 1]) * 2.0 / 3.0;
-    for i in 0..NB_BANDS {
-        band_e[i] = sum[i + 1];
-    }
+    band_e[..NB_BANDS].copy_from_slice(&sum[1..=NB_BANDS]);
 }
 
 /// `compute_band_corr`: aggregate `Re(X conj-correlated with P)` into bands.
@@ -128,9 +130,7 @@ pub(crate) fn compute_band_corr(band_e: &mut [f32], x: &[Cpx], p: &[Cpx]) {
     }
     sum[1] = (sum[0] + sum[1]) * 2.0 / 3.0;
     sum[NB_BANDS] = (sum[NB_BANDS] + sum[NB_BANDS + 1]) * 2.0 / 3.0;
-    for i in 0..NB_BANDS {
-        band_e[i] = sum[i + 1];
-    }
+    band_e[..NB_BANDS].copy_from_slice(&sum[1..=NB_BANDS]);
 }
 
 /// `interp_band_gain`: expand per-band gains to per-bin gains by linear

@@ -45,19 +45,28 @@ fn c_mul(a: Cpx, b: Cpx) -> Cpx {
 
 #[inline(always)]
 fn c_add(a: Cpx, b: Cpx) -> Cpx {
-    Cpx { r: a.r + b.r, i: a.i + b.i }
+    Cpx {
+        r: a.r + b.r,
+        i: a.i + b.i,
+    }
 }
 
 #[inline(always)]
 fn c_sub(a: Cpx, b: Cpx) -> Cpx {
-    Cpx { r: a.r - b.r, i: a.i - b.i }
+    Cpx {
+        r: a.r - b.r,
+        i: a.i - b.i,
+    }
 }
 
 impl KissFft {
     /// Build an FFT state for `nfft` points. `nfft` must factor into 2/3/4/5.
     pub fn new(nfft: usize) -> Self {
         let mut factors = [0i16; 2 * MAXFACTORS];
-        assert!(kf_factor(nfft as i32, &mut factors), "unsupported FFT size {nfft}");
+        assert!(
+            kf_factor(nfft as i32, &mut factors),
+            "unsupported FFT size {nfft}"
+        );
 
         let mut twiddles = vec![Cpx::default(); nfft];
         compute_twiddles(&mut twiddles, nfft);
@@ -75,6 +84,7 @@ impl KissFft {
         KissFft { bitrev, ..st }
     }
 
+    #[allow(dead_code)]
     pub fn nfft(&self) -> usize {
         self.nfft
     }
@@ -89,14 +99,24 @@ impl KissFft {
         for i in 0..self.nfft {
             let x = fin[i];
             let dst = self.bitrev[i] as usize;
-            fout[dst] = Cpx { r: scale * x.r, i: scale * x.i };
+            fout[dst] = Cpx {
+                r: scale * x.r,
+                i: scale * x.i,
+            };
         }
         self.process(fout);
     }
 
     // --- internal ---------------------------------------------------------
 
-    fn compute_bitrev_table(&self, fout: i32, f: usize, fstride: usize, fi: usize, bitrev: &mut [i32]) {
+    fn compute_bitrev_table(
+        &self,
+        fout: i32,
+        f: usize,
+        fstride: usize,
+        fi: usize,
+        bitrev: &mut [i32],
+    ) {
         let p = self.factors[2 * fi] as i32;
         let m = self.factors[2 * fi + 1] as i32;
         if m == 1 {
@@ -139,9 +159,30 @@ impl KissFft {
             let m2 = if i != 0 { factors[2 * i - 1] as i32 } else { 1 };
             match factors[2 * i] {
                 2 => bfly2(fout, m, fstride[i] as i32),
-                4 => bfly4(fout, fstride[i] << shift, &self.twiddles, m, fstride[i] as i32, m2),
-                3 => bfly3(fout, fstride[i] << shift, &self.twiddles, m, fstride[i] as i32, m2),
-                5 => bfly5(fout, fstride[i] << shift, &self.twiddles, m, fstride[i] as i32, m2),
+                4 => bfly4(
+                    fout,
+                    fstride[i] << shift,
+                    &self.twiddles,
+                    m,
+                    fstride[i] as i32,
+                    m2,
+                ),
+                3 => bfly3(
+                    fout,
+                    fstride[i] << shift,
+                    &self.twiddles,
+                    m,
+                    fstride[i] as i32,
+                    m2,
+                ),
+                5 => bfly5(
+                    fout,
+                    fstride[i] << shift,
+                    &self.twiddles,
+                    m,
+                    fstride[i] as i32,
+                    m2,
+                ),
                 p => unreachable!("unsupported radix {p}"),
             }
             m = m2;
@@ -249,8 +290,14 @@ fn bfly4(f: &mut [Cpx], fstride: usize, tw: &[Cpx], m: i32, n: i32, mm: i32) {
             f[base + 2] = c_sub(f[base], scratch1);
             f[base] = c_add(f[base], scratch1);
             let scratch1 = c_sub(f[base + 1], f[base + 3]);
-            f[base + 1] = Cpx { r: scratch0.r + scratch1.i, i: scratch0.i - scratch1.r };
-            f[base + 3] = Cpx { r: scratch0.r - scratch1.i, i: scratch0.i + scratch1.r };
+            f[base + 1] = Cpx {
+                r: scratch0.r + scratch1.i,
+                i: scratch0.i - scratch1.r,
+            };
+            f[base + 3] = Cpx {
+                r: scratch0.r - scratch1.i,
+                i: scratch0.i + scratch1.r,
+            };
         }
     } else {
         let m2 = 2 * m;
@@ -270,8 +317,14 @@ fn bfly4(f: &mut [Cpx], fstride: usize, tw: &[Cpx], m: i32, n: i32, mm: i32) {
                 let s4 = c_sub(s0, s2);
                 f[idx + m2] = c_sub(f[idx], s3);
                 f[idx] = c_add(f[idx], s3);
-                f[idx + m] = Cpx { r: s5.r + s4.i, i: s5.i - s4.r };
-                f[idx + m3] = Cpx { r: s5.r - s4.i, i: s5.i + s4.r };
+                f[idx + m] = Cpx {
+                    r: s5.r + s4.i,
+                    i: s5.i - s4.r,
+                };
+                f[idx + m3] = Cpx {
+                    r: s5.r - s4.i,
+                    i: s5.i + s4.r,
+                };
             }
         }
     }
@@ -374,7 +427,10 @@ mod tests {
                 acc.r += x.r * c - x.i * s;
                 acc.i += x.r * s + x.i * c;
             }
-            *o = Cpx { r: acc.r * scale, i: acc.i * scale };
+            *o = Cpx {
+                r: acc.r * scale,
+                i: acc.i * scale,
+            };
         }
         out
     }

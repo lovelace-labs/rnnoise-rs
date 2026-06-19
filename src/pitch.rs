@@ -47,7 +47,13 @@ pub(crate) fn pitch_downsample(x: &[f32], x_lp: &mut [f32], len: usize) {
 }
 
 /// `find_best_pitch`: pick the two best lags by normalised correlation.
-fn find_best_pitch(xcorr: &[f32], y: &[f32], len: usize, max_pitch: usize, best_pitch: &mut [usize; 2]) {
+fn find_best_pitch(
+    xcorr: &[f32],
+    y: &[f32],
+    len: usize,
+    max_pitch: usize,
+    best_pitch: &mut [usize; 2],
+) {
     let mut syy = 1.0f32;
     let mut best_num = [-1.0f32; 2];
     let mut best_den = [0.0f32; 2];
@@ -98,7 +104,13 @@ pub(crate) fn pitch_search(x_lp: &[f32], y: &[f32], len: usize, max_pitch: usize
     }
 
     // Coarse search with 4× decimation.
-    pitch_xcorr(&x_lp4[..len >> 2], &y_lp4, &mut xcorr[..max_pitch >> 2], len >> 2, max_pitch >> 2);
+    pitch_xcorr(
+        &x_lp4[..len >> 2],
+        &y_lp4,
+        &mut xcorr[..max_pitch >> 2],
+        len >> 2,
+        max_pitch >> 2,
+    );
     find_best_pitch(&xcorr, &y_lp4, len >> 2, max_pitch >> 2, &mut best_pitch);
 
     // Finer search with 2× decimation.
@@ -243,7 +255,11 @@ pub(crate) fn remove_doubling(
 
     let mut xcorr = [0.0f32; 3];
     for k in 0..3i32 {
-        xcorr[k as usize] = inner_prod(&x[xb..], &x[(xb as i32 - (t + k - 1)) as usize..], n as usize);
+        xcorr[k as usize] = inner_prod(
+            &x[xb..],
+            &x[(xb as i32 - (t + k - 1)) as usize..],
+            n as usize,
+        );
     }
     let offset = if (xcorr[2] - xcorr[0]) > 0.7 * (xcorr[1] - xcorr[0]) {
         1

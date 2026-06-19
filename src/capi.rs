@@ -67,7 +67,10 @@ pub unsafe extern "C" fn rnnoise_process_frame(
 /// # Safety
 /// `ptr` must point to `len` valid bytes.
 #[no_mangle]
-pub unsafe extern "C" fn rnnoise_model_from_buffer(ptr: *const c_void, len: c_int) -> *mut RNNModel {
+pub unsafe extern "C" fn rnnoise_model_from_buffer(
+    ptr: *const c_void,
+    len: c_int,
+) -> *mut RNNModel {
     if ptr.is_null() || len <= 0 {
         return std::ptr::null_mut();
     }

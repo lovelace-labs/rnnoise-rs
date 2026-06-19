@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use crate::nnet::LinearLayer;
+use crate::nnet::{LinearLayer, Weights};
 
 /// The default RNNoise model (float weights), embedded in the binary.
 static DEFAULT_MODEL_BLOB: &[u8] = include_bytes!("../models/rnnoise_default.bin");
@@ -87,26 +87,42 @@ fn parse_weights(blob: &[u8]) -> Result<HashMap<&str, Array<'_>>, ModelError> {
         if data_start + block_size > blob.len() {
             return Err(ModelError::Malformed);
         }
-        map.insert(name, Array { kind, data: &blob[data_start..data_start + size] });
+        map.insert(
+            name,
+            Array {
+                kind,
+                data: &blob[data_start..data_start + size],
+            },
+        );
         off = data_start + block_size;
     }
     Ok(map)
 }
 
 fn f32_array(arrays: &HashMap<&str, Array<'_>>, name: &str) -> Result<Vec<f32>, ModelError> {
-    let a = arrays.get(name).ok_or_else(|| ModelError::MissingArray(name.to_string()))?;
+    let a = arrays
+        .get(name)
+        .ok_or_else(|| ModelError::MissingArray(name.to_string()))?;
     if a.kind != WEIGHT_TYPE_FLOAT || a.data.len() % 4 != 0 {
         return Err(ModelError::BadSize(name.to_string()));
     }
-    Ok(a.data.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
+    Ok(a.data
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect())
 }
 
 fn i32_array(arrays: &HashMap<&str, Array<'_>>, name: &str) -> Result<Vec<i32>, ModelError> {
-    let a = arrays.get(name).ok_or_else(|| ModelError::MissingArray(name.to_string()))?;
+    let a = arrays
+        .get(name)
+        .ok_or_else(|| ModelError::MissingArray(name.to_string()))?;
     if a.kind != WEIGHT_TYPE_INT || a.data.len() % 4 != 0 {
         return Err(ModelError::BadSize(name.to_string()));
     }
-    Ok(a.data.chunks_exact(4).map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
+    Ok(a.data
+        .chunks_exact(4)
+        .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect())
 }
 
 /// Build a dense or sparse layer, validating bias/weight sizes (`linear_init`).
@@ -150,7 +166,7 @@ fn linear(
 
     Ok(LinearLayer {
         bias: bias_v,
-        float_weights,
+        weights: Weights::Float(float_weights),
         weights_idx,
         diag: diag_v,
         nb_inputs,
@@ -186,17 +202,118 @@ impl RnnModel {
     pub fn from_bytes(blob: &[u8]) -> Result<RnnModel, ModelError> {
         let arrays = parse_weights(blob)?;
         Ok(RnnModel {
-            conv1: linear(&arrays, "conv1_bias", "conv1_weights_float", None, None, 195, 128)?,
-            conv2: linear(&arrays, "conv2_bias", "conv2_weights_float", None, None, 384, 384)?,
-            gru1_input: linear(&arrays, "gru1_input_bias", "gru1_input_weights_float", Some("gru1_input_weights_idx"), None, 384, 1152)?,
-            gru1_recurrent: linear(&arrays, "gru1_recurrent_bias", "gru1_recurrent_weights_float", Some("gru1_recurrent_weights_idx"), Some("gru1_recurrent_weights_diag"), 384, 1152)?,
-            gru2_input: linear(&arrays, "gru2_input_bias", "gru2_input_weights_float", Some("gru2_input_weights_idx"), None, 384, 1152)?,
-            gru2_recurrent: linear(&arrays, "gru2_recurrent_bias", "gru2_recurrent_weights_float", Some("gru2_recurrent_weights_idx"), Some("gru2_recurrent_weights_diag"), 384, 1152)?,
-            gru3_input: linear(&arrays, "gru3_input_bias", "gru3_input_weights_float", Some("gru3_input_weights_idx"), None, 384, 1152)?,
-            gru3_recurrent: linear(&arrays, "gru3_recurrent_bias", "gru3_recurrent_weights_float", Some("gru3_recurrent_weights_idx"), Some("gru3_recurrent_weights_diag"), 384, 1152)?,
-            dense_out: linear(&arrays, "dense_out_bias", "dense_out_weights_float", None, None, 1536, 32)?,
-            vad_dense: linear(&arrays, "vad_dense_bias", "vad_dense_weights_float", None, None, 1536, 1)?,
+            conv1: linear(
+                &arrays,
+                "conv1_bias",
+                "conv1_weights_float",
+                None,
+                None,
+                195,
+                128,
+            )?,
+            conv2: linear(
+                &arrays,
+                "conv2_bias",
+                "conv2_weights_float",
+                None,
+                None,
+                384,
+                384,
+            )?,
+            gru1_input: linear(
+                &arrays,
+                "gru1_input_bias",
+                "gru1_input_weights_float",
+                Some("gru1_input_weights_idx"),
+                None,
+                384,
+                1152,
+            )?,
+            gru1_recurrent: linear(
+                &arrays,
+                "gru1_recurrent_bias",
+                "gru1_recurrent_weights_float",
+                Some("gru1_recurrent_weights_idx"),
+                Some("gru1_recurrent_weights_diag"),
+                384,
+                1152,
+            )?,
+            gru2_input: linear(
+                &arrays,
+                "gru2_input_bias",
+                "gru2_input_weights_float",
+                Some("gru2_input_weights_idx"),
+                None,
+                384,
+                1152,
+            )?,
+            gru2_recurrent: linear(
+                &arrays,
+                "gru2_recurrent_bias",
+                "gru2_recurrent_weights_float",
+                Some("gru2_recurrent_weights_idx"),
+                Some("gru2_recurrent_weights_diag"),
+                384,
+                1152,
+            )?,
+            gru3_input: linear(
+                &arrays,
+                "gru3_input_bias",
+                "gru3_input_weights_float",
+                Some("gru3_input_weights_idx"),
+                None,
+                384,
+                1152,
+            )?,
+            gru3_recurrent: linear(
+                &arrays,
+                "gru3_recurrent_bias",
+                "gru3_recurrent_weights_float",
+                Some("gru3_recurrent_weights_idx"),
+                Some("gru3_recurrent_weights_diag"),
+                384,
+                1152,
+            )?,
+            dense_out: linear(
+                &arrays,
+                "dense_out_bias",
+                "dense_out_weights_float",
+                None,
+                None,
+                1536,
+                32,
+            )?,
+            vad_dense: linear(
+                &arrays,
+                "vad_dense_bias",
+                "vad_dense_weights_float",
+                None,
+                None,
+                1536,
+                1,
+            )?,
         })
+    }
+
+    /// Return an int8-quantized copy of this model: a ~4×-smaller weight
+    /// footprint and meaningfully faster inference, at the cost of a small loss
+    /// of numerical accuracy (it is **not** bit-exact with the C reference).
+    ///
+    /// Mirrors upstream's choice to quantize only conv2 and the GRU matrices;
+    /// conv1 and the output heads stay full precision.
+    pub fn quantized(mut self) -> RnnModel {
+        for layer in [
+            &mut self.conv2,
+            &mut self.gru1_input,
+            &mut self.gru1_recurrent,
+            &mut self.gru2_input,
+            &mut self.gru2_recurrent,
+            &mut self.gru3_input,
+            &mut self.gru3_recurrent,
+        ] {
+            layer.quantize();
+        }
+        self
     }
 }
 

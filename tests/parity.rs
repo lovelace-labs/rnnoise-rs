@@ -61,3 +61,39 @@ fn matches_c_reference() {
     assert!(rel < 1e-6, "relative energy diff too large: {rel:.3e}");
     assert!(max_diff <= 2, "max sample diff too large: {max_diff}");
 }
+
+#[test]
+fn quantized_accuracy() {
+    use rnnoise::RnnModel;
+    use std::sync::Arc;
+    let input = load_i16(include_bytes!("../test_data/testing.raw"));
+    let reference = load_i16(include_bytes!("../test_data/ref_out.raw"));
+    let model = Arc::new(RnnModel::default().quantized());
+    let mut st = DenoiseState::with_model(model);
+    let mut out_buf = [0.0f32; FRAME_SIZE];
+    let mut output: Vec<f32> = Vec::new();
+    let mut first = true;
+    for chunk in input.chunks_exact(FRAME_SIZE) {
+        let frame: Vec<f32> = chunk.iter().map(|&s| s as f32).collect();
+        st.process_frame(&mut out_buf, &frame);
+        if !first {
+            output.extend_from_slice(&out_buf);
+        }
+        first = false;
+    }
+    let out_i16: Vec<i16> = output.iter().map(|&x| x as i16).collect();
+    let mut ss_ref = 0.0f64;
+    let mut ss_diff = 0.0f64;
+    let mut maxd = 0i32;
+    for (&r, &o) in reference.iter().zip(&out_i16) {
+        ss_ref += (r as f64).powi(2);
+        ss_diff += ((r as i32 - o as i32) as f64).powi(2);
+        maxd = maxd.max((r as i32 - o as i32).abs());
+    }
+    eprintln!(
+        "quantized vs float-reference: rel_energy={:.3e} max_diff={}",
+        ss_diff / ss_ref,
+        maxd
+    );
+    assert!(ss_diff / ss_ref < 5e-3, "int8 deviation too large");
+}

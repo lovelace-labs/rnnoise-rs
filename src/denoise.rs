@@ -5,9 +5,7 @@
 
 use std::sync::{Arc, OnceLock};
 
-use crate::common::{
-    biquad, compute_band_corr, compute_band_energy, interp_band_gain, Common,
-};
+use crate::common::{biquad, compute_band_corr, compute_band_energy, interp_band_gain, Common};
 use crate::fft::Cpx;
 use crate::nnet::{compute_rnn, RnnState};
 use crate::pitch::{pitch_downsample, pitch_search, remove_doubling};
@@ -87,7 +85,13 @@ impl DenoiseState {
         // DC-removal high-pass.
         const A_HP: [f32; 2] = [-1.99599, 0.99600];
         const B_HP: [f32; 2] = [-2.0, 1.0];
-        biquad(&mut x, &mut self.mem_hp_x, &input[..FRAME_SIZE], &B_HP, &A_HP);
+        biquad(
+            &mut x,
+            &mut self.mem_hp_x,
+            &input[..FRAME_SIZE],
+            &B_HP,
+            &A_HP,
+        );
 
         let mut xfreq = [Cpx::default(); FREQ_SIZE];
         let mut p = [Cpx::default(); FREQ_SIZE];
@@ -97,7 +101,13 @@ impl DenoiseState {
         let mut features = [0.0f32; NB_FEATURES];
 
         let silence = self.compute_frame_features(
-            &mut xfreq, &mut p, &mut ex, &mut ep, &mut exp, &mut features, &x,
+            &mut xfreq,
+            &mut p,
+            &mut ex,
+            &mut ep,
+            &mut exp,
+            &mut features,
+            &x,
         );
 
         let mut g = [0.0f32; NB_BANDS];
@@ -201,9 +211,7 @@ impl DenoiseState {
 
         let mut pbuf = [0.0f32; WINDOW_SIZE];
         let base = PITCH_BUF_SIZE - WINDOW_SIZE - pitch_index as usize;
-        for i in 0..WINDOW_SIZE {
-            pbuf[i] = self.pitch_buf[base + i];
-        }
+        pbuf.copy_from_slice(&self.pitch_buf[base..base + WINDOW_SIZE]);
         c.apply_window(&mut pbuf);
         c.forward_transform(p, &pbuf);
         compute_band_energy(ep, p);
@@ -261,14 +269,7 @@ fn frame_synthesis(c: &Common, out: &mut [f32], synthesis_mem: &mut [f32], y: &[
 
 /// `rnn_pitch_filter`: comb-filter the spectrum towards the pitch-predicted
 /// spectrum `p`, then renormalise band energy.
-fn pitch_filter(
-    xfreq: &mut [Cpx],
-    p: &[Cpx],
-    ex: &[f32],
-    ep: &[f32],
-    exp: &[f32],
-    g: &[f32],
-) {
+fn pitch_filter(xfreq: &mut [Cpx], p: &[Cpx], ex: &[f32], ep: &[f32], exp: &[f32], g: &[f32]) {
     let mut r = [0.0f32; NB_BANDS];
     for i in 0..NB_BANDS {
         let mut ri = if exp[i] > g[i] {

@@ -9,7 +9,7 @@ repository = "https://github.com/lovelace-rs/rnnoise-rs"
 readme = "README.md"
 keywords = ["rnnoise", "denoise", "noise", "audio", "dsp"]
 categories = ["multimedia::audio", "science"]
-exclude = ["bup/*", "scripts/*", "test_data/*.raw"]
+exclude = ["bup", "scripts"]
 
 [lib]
 name = "rnnoise"

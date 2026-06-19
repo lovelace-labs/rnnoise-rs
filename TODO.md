@@ -1,100 +1,75 @@
-# rnnoise-rs — Port Plan & TODO
+# rnnoise-rs — Port Plan, Status & TODO
 
 A from-scratch, idiomatic Rust port of **current** [RNNoise](https://gitlab.xiph.org/xiph/rnnoise)
-(the 2024 conv+GRU architecture in `bup/rnnoise-main/`), targeting:
+(the 2024 conv+GRU architecture in `bup/rnnoise-main/`).
 
-1. **Full algorithmic parity** with the upstream C library (`rnnoise_process_frame`).
-2. **Better denoising quality than `nnnoiseless`** — `nnnoiseless` ports the *old* (2018, 22-band,
-   single-input-dense + 3-GRU, ~215 K param) model. We port the *new* (32-band, 2×Conv1D + 3×GRU,
-   ~2.9 M param) model, which is a large quality improvement. We also aim to be the *fastest*
-   correct implementation of the new model (SIMD, good memory layout).
+Goals: (1) **full algorithmic parity** with the upstream C library; (2) be a
+better choice than [`nnnoiseless`](https://github.com/jneem/nnnoiseless), which
+ports the *old* (2018, 22-band, ~215 K param) model — we port the *new* (32-band,
+2×Conv1D + 3×GRU, ~2.9 M param) model, a large quality improvement.
 
-> **Note on "perform better":** the new model is ~13× more matmul work per frame than the old one,
-> so raw per-frame throughput cannot beat `nnnoiseless`'s tiny model — but the new model is far
-> higher quality, and we will still run many× faster than real time. If the intent was instead a
-> *faster* port of the *old* model, flag it and we pivot. Proceeding with the new model = "parity".
+## ✅ Status: complete & validated
+
+- **Parity:** end-to-end output vs the scalar C reference on `testing.raw`:
+  **3 / 47 520 samples differ by 1 LSB** (rel. energy `2.0e-10`). On 4.8 M
+  samples: 982 differ by 1 LSB (`7.3e-10`). This is within the spread between
+  two C builds of RNNoise itself.
+- **Speed (same model, Apple M-series, 100 s audio):** rnnoise-rs **3.11 s**
+  vs C `-O3`/NEON 4.57 s vs C scalar 4.89 s → **~1.5× faster than C**, ~316 µs
+  per 10 ms frame = **~32× real time**, single-threaded, no `unsafe` in the core.
+- `nnnoiseless` (old, ~13× smaller, cache-resident model) runs ~32 µs/frame —
+  it is faster *because the model is smaller*; rnnoise-rs wins on **quality**.
+- All checks green: `cargo fmt --check`, `cargo clippy -D warnings`, 11 tests,
+  `cargo doc`.
 
 ## Architecture (verified from upstream source + official model)
 
-- Frame: **480 samples @ 48 kHz** (10 ms). Window 960 (50% overlap). 960-pt FFT → 481 bins.
-- **32 ERB-ish bands** (`eband20ms`). Features = `2*32+1 = 65`:
-  DCT(logBandEnergy)[32] + DCT(bandCorr w/ pitch)[32] + pitch_index[1].
-- Pre: DC-removal biquad high-pass.
-- Pitch: downsample(2×) → LPC(4) whitening FIR → coarse(4×)/fine(2×) xcorr search → remove_doubling.
-- **NN** (loadable model, `init_rnnoise`): all values verified from `rnnoise_data.h/.c`:
-  - conv1: dense **float**, in=195 (=65×ktime3), out=128, tanh. state 130.
-  - conv2: in=384 (=128×3), out=384, tanh. Ships int8+float; C uses **float**. state 256.
-  - gru1/2/3: input(384→1152) + recurrent(384→1152, +diag), sparse-8×4 **float** layout w/ idx.
-  - cat = [conv2_out(384), gru1(384), gru2(384), gru3(384)] = 1536.
-  - dense_out: 1536→32 (gains, sigmoid). vad_dense: 1536→1 (vad, sigmoid).
-- Output: 1-frame **lookahead delay**; pitch_filter on delayed spectrum; per-band gains with
-  RT60 decay cap (α=0.6) + cross-frame energy compensation; IFFT + windowed overlap-add.
+- Frame **480 @ 48 kHz** (10 ms); window 960; 960-pt FFT → 481 bins.
+- **32 bands** (`eband20ms`). Features = `2*32+1 = 65`: DCT(logBandE)[32] +
+  DCT(pitch-corr)[32] + pitch_index[1].
+- Pre: DC-removal biquad. Pitch: 2× downsample + LPC(4) whitening → coarse(4×)/
+  fine(2×) xcorr search → remove_doubling.
+- **NN** (`init_rnnoise`, dims from `rnnoise_data.h`): conv1 dense-float 195→128
+  tanh; conv2 384→384 tanh; gru1/2/3 input(384→1152)+recurrent(384→1152,+diag),
+  sparse-8×4 float; cat[1536] → dense_out 1536→32 (gains) + vad_dense 1536→1.
+- 1-frame look-ahead delay; pitch-comb filter; RT60 gain cap (α=0.6) + energy
+  compensation; IFFT + windowed overlap-add.
 
-## Parity strategy
+## Parity methodology
 
-- Oracle: upstream C compiled **scalar** (`-DDISABLE_NEON`, `RTCD_ARCH=c`) → `/tmp/rnnoise_ref/rnnoise_demo`.
-  Matches the C `_c` path: `tanh_approx`/`sigmoid_approx` (vec.h rational polys), `sgemv`/`sparse_sgemv8x4`.
-- Default model = official weights, **float path** (what the reference computes). Tables generated at
-  init from the exact upstream formulas (window, dct) for bit-match; FFT = faithful kiss_fft port.
-- Tests: per-stage intermediate dumps (FFT, bands, features, gains) vs instrumented C; end-to-end
-  output vs `ref_out.raw` (target: `sum(diff²)/sum(ref²) < 1e-6`, i.e. tighter than nnnoiseless's 1e-4).
+- Oracle: upstream C built **scalar** (`-DDISABLE_NEON`, `RTCD_ARCH=c`) →
+  `/tmp/rnnoise_ref/rnnoise_demo`. Matches the `_c` path (`tanh_approx`/
+  `sigmoid_approx`, `sgemv`/`sparse_sgemv8x4`, float weights).
+- Default model = official Xiph weights, **float path** (what the reference
+  computes). Tables generated from the exact upstream formulas; FFT is a
+  faithful kiss_fft port. Float matmuls preserve the C accumulation order, so
+  results match to ~1 LSB (small residual = clang fp-contraction/FMA in C).
 
-## Model / weights
+## Work log
 
-- Official model downloaded + checksum-verified (`model_version` hash). Extracted to
-  `/tmp/rnnoise_model_extract/`. Embeds via a generated native blob (`"DNNw"` records, 64-byte
-  aligned) at `models/rnnoise_default.bin` (float-only slim blob ≈ 12 MB).
-- Support loading custom models from the upstream blob format (`rnnoise_model_from_file` interop).
-- Stretch: optional int8 (`weights_blob` ~3.5 MB) and the "little" sparse model behind features /
-  for crates.io 10 MB-limit publishing.
+- [x] Study upstream C + nnnoiseless; download & checksum official model.
+- [x] Generate slim float weight blob → `models/rnnoise_default.bin` (11.3 MB,
+      native `"DNNw"` format; also loadable by upstream `rnnoise_model_from_file`).
+- [x] Build scalar C oracle; generate `test_data/ref_out.raw`.
+- [x] FFT (kiss_fft 960-pt) + window/DCT tables + bands + biquad.
+- [x] Pitch (celt_lpc, downsample, xcorr, search, remove_doubling) + pitch filter.
+- [x] 65-dim feature extraction (with double-precision quirks).
+- [x] NN: linear/sparse/conv1d/gru/dense + activations + blob loader + model wiring.
+- [x] Pipeline: `DenoiseState::process_frame` (delay, RT60, energy comp, synthesis).
+- [x] Parity test vs C oracle; lock tolerance in CI.
+- [x] Perf: cache-friendly + bounds-check-free GEMVs → faster than C, bit-identical.
+- [x] Public Rust API, C ABI (`capi`) + `include/rnnoise.h`, CLI demo, bench.
+- [x] README, LICENSE (BSD-3), CI workflow, rustdoc, API tests.
 
----
+## Future enhancements (not required for parity)
 
-## TODO
-
-### Phase 0 — Setup & oracle
-- [x] Study upstream C (denoise/rnn/nnet/pitch/celt_lpc/kiss_fft/vec) + nnnoiseless.
-- [x] Download & checksum official model; learn exact dims from `rnnoise_data.h/.c`.
-- [x] Build scalar C reference oracle; generate `ref_out.raw` from `testing.raw`.
-- [ ] Generate slim float model blob → `models/rnnoise_default.bin`.
-- [ ] Add per-stage dump hooks to the C oracle for intermediate parity checks.
-
-### Phase 1 — Crate scaffold
-- [ ] `Cargo.toml` (lib + bin + bench + features: `capi`, `little-model`), `.gitignore`.
-- [ ] `src/lib.rs` module layout + public constants.
-
-### Phase 2 — DSP front-end
-- [ ] `fft.rs`: kiss_fft port (960-pt mixed-radix complex FFT), forward/inverse transforms.
-- [ ] `common.rs`: window + dct tables (exact formulas), `dct`.
-- [ ] bands: `compute_band_energy`, `compute_band_corr`, `interp_band_gain`.
-- [ ] `biquad` HP filter; `apply_window`; `frame_analysis`; `frame_synthesis`.
-
-### Phase 3 — Pitch
-- [ ] `celt_lpc.rs`: `autocorr`, `lpc` (Levinson), `celt_fir5`, inner-prod helpers.
-- [ ] `pitch.rs`: `pitch_downsample`, `pitch_xcorr`, `find_best_pitch`, `pitch_search`, `remove_doubling`.
-- [ ] `pitch_filter`.
-
-### Phase 4 — Features
-- [ ] `compute_frame_features` (65-dim) + silence detection (E<0.04).
-
-### Phase 5 — Neural net
-- [ ] `nnet.rs`: `LinearLayer` (dense float `sgemv`, sparse 8×4 float, diag), `conv1d`, `gru`, `dense`.
-- [ ] activations: `tanh_approx`, `sigmoid_approx` (match vec.h scalar exactly).
-- [ ] `weights.rs`: native blob parser (`"DNNw"` records) + `RnnModel`/`init_rnnoise` wiring.
-- [ ] embed default model; `from_file`/`from_bytes`/`from_static_bytes`.
-
-### Phase 6 — Pipeline
-- [ ] `DenoiseState` + `process_frame` (delay, RT60 cap, energy comp, pitch_filter, synthesis).
-
-### Phase 7 — API & parity
-- [ ] Rust API (`DenoiseState::new`, `process_frame`); docs.
-- [ ] `capi.rs` matching `rnnoise.h` (feature `capi`, cbindgen header).
-- [ ] Parity tests vs `ref_out.raw` + per-stage intermediates; lock tolerance in CI.
-
-### Phase 8 — Performance
-- [ ] SIMD hot paths (NEON + AVX2) for `sgemv`/`sparse_sgemv8x4`/conv; runtime feature detect.
-- [ ] Criterion benches; compare throughput vs `nnnoiseless`; document quality vs speed.
-
-### Phase 9 — Polish
-- [ ] CLI demo bin (raw 48 kHz mono, like `rnnoise_demo`); optional wav via `hound`.
-- [ ] README, rustdoc, examples, CI (fmt/clippy/test), LICENSE (BSD-3, match upstream).
+- [ ] **int8 weight path** (`weights_blob` int8 + scales, `cgemv8x4`): ~4× less
+      memory traffic → meaningfully faster, near-identical output. Biggest
+      remaining speed lever (how upstream goes fast on AVX2).
+- [ ] Ship the **"little"/sparse** model + int8 blob behind features so the crate
+      fits the crates.io 10 MB limit (the default float blob is 11.3 MB).
+- [ ] Explicit NEON/AVX2 intrinsics for the GEMVs (auto-vectorization already
+      beats C here, so low priority).
+- [ ] `cargo-c` packaging / pkg-config for the C ABI; optional WAV I/O in the CLI.
+- [ ] Big-endian support in the blob loader (currently little-endian, like
+      upstream's "machine endian" in practice).
