@@ -1,0 +1,38 @@
+[package]
+name = "rnnoise-rs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+license = "BSD-3-Clause"
+description = "Idiomatic Rust port of Xiph RNNoise (current conv+GRU model) for real-time speech noise suppression"
+repository = "https://github.com/lovelace-rs/rnnoise-rs"
+readme = "README.md"
+keywords = ["rnnoise", "denoise", "noise", "audio", "dsp"]
+categories = ["multimedia::audio", "science"]
+exclude = ["bup/*", "scripts/*", "test_data/*.raw"]
+
+[lib]
+name = "rnnoise"
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[features]
+default = []
+# Expose a C ABI matching rnnoise.h (DenoiseState / rnnoise_process_frame ...).
+capi = []
+
+[dependencies]
+
+[dev-dependencies]
+
+[[bin]]
+name = "rnnoise-demo"
+path = "src/bin/rnnoise_demo.rs"
+
+[[bench]]
+name = "process"
+harness = false
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
