@@ -47,7 +47,7 @@ fn legacy_matches_old_model() {
     }
     let rel = ss_diff / ss_ref;
     eprintln!("legacy parity: nonzero={nonzero} max_diff={max_diff} rel_energy={rel:.3e}");
-    // KISS-FFT vs nnnoiseless's rustfft accounts for ~1 LSB on some samples,
-    // the same spread nnnoiseless itself has vs the original C reference.
+    // ~1e-5: the int8 activation quantization in the `sdot`-accelerated GRU input
+    // matmuls (the speed win over nnnoiseless). Imperceptible.
     assert!(rel < 1e-4, "legacy deviation too large: {rel:.3e}");
 }

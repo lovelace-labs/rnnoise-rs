@@ -22,20 +22,22 @@ pub(crate) fn inner_prod(x: &[f32], y: &[f32], n: usize) -> f32 {
     xy
 }
 
-/// `dual_inner_prod`: two correlations sharing the `x` operand (vectorized).
+/// `dual_inner_prod`: two correlations sharing the `x` operand (4-wide).
 #[inline]
 pub(crate) fn dual_inner_prod(x: &[f32], y01: &[f32], y02: &[f32], n: usize) -> (f32, f32) {
-    let (mut a0, mut a1, mut b0, mut b1) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
-    let n2 = n - n % 2;
+    let mut a = [0.0f32; 4];
+    let mut b = [0.0f32; 4];
+    let n4 = n - n % 4;
     let mut i = 0;
-    while i < n2 {
-        a0 += x[i] * y01[i];
-        a1 += x[i + 1] * y01[i + 1];
-        b0 += x[i] * y02[i];
-        b1 += x[i + 1] * y02[i + 1];
-        i += 2;
+    while i < n4 {
+        for k in 0..4 {
+            a[k] += x[i + k] * y01[i + k];
+            b[k] += x[i + k] * y02[i + k];
+        }
+        i += 4;
     }
-    let (mut a, mut b) = (a0 + a1, b0 + b1);
+    let mut a = (a[0] + a[1]) + (a[2] + a[3]);
+    let mut b = (b[0] + b[1]) + (b[2] + b[3]);
     while i < n {
         a += x[i] * y01[i];
         b += x[i] * y02[i];

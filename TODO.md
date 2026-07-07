@@ -75,13 +75,16 @@ nnnoiseless 0.32 s (smaller/older model). The NN is 89 % of each frame and is
       0.81× (slower) — the win is `sdot`'s instruction-count reduction, since the
       model is compute/load-bound, not bandwidth-bound. Float stays the default.
 - [x] **Legacy (2018) model support** (`legacy-model` feature → `DenoiseStateV1`):
-      the old 22-band dense+3-GRU model. Bit-parity to within ~1 LSB (rel. 1.1e-7)
-      vs the old model; **38.4 µs/frame (261× RT)** — its NN (9.3 µs) matches
-      nnnoiseless's (9.8 µs); the gap is the front-end FFT.
-- [x] **Two-real-FFT front-end** (legacy): compute the signal + pitch-lagged
-      forward FFTs as one complex FFT (`z = x + i·p`) and split the spectrum.
-      Legacy 44.9 → 38.4 µs (~15 %), no parity loss. Remaining: real-input FFT
-      for the last forward + inverse.
+      the old 22-band dense+3-GRU model — now **faster than nnnoiseless**:
+      **25.9 µs/frame (309× RT) vs nnnoiseless 27.6 µs** (fair head-to-head),
+      matching the old model to ~1e-5 rel. energy. Got there via:
+  - [x] `realfft` (rustfft) for the FFT — same fast FFT nnnoiseless uses (optional
+        dep, gated to the feature; KISS-FFT stays the default for the bit-exact
+        current model). Legacy 44.9 → ~27.8 µs.
+  - [x] 4-lags-at-once pitch cross-correlation + 4-wide inner products.
+  - [x] NEON `sdot` int8 GRU input matmuls (dynamically-quantized activations) —
+        the decisive edge nnnoiseless doesn't have; int8 stays (f32 weights were
+        *slower* — 4× cache traffic).
 
 ## Future enhancements (not required for parity)
 

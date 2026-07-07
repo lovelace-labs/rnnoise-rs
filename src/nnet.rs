@@ -240,6 +240,48 @@ fn dense_q8_scalar(out: &mut [f32], w: &[i8], scale: &[f32], m: usize, n: usize,
     }
 }
 
+/// int8 dot product of two equal-length slices, accumulated in i32 (NEON `sdot`
+/// when available, scalar otherwise — identical result). Used by the legacy
+/// model's GRU input matmuls.
+#[cfg(feature = "legacy-model")]
+pub(crate) fn i8_dot(w: &[i8], x: &[i8]) -> i32 {
+    let n = w.len();
+    #[cfg(target_arch = "aarch64")]
+    {
+        if std::arch::is_aarch64_feature_detected!("dotprod") {
+            // SAFETY: guarded by runtime `dotprod` detection.
+            return unsafe { i8_dot_neon(w, x, n) };
+        }
+    }
+    let mut acc = 0i32;
+    for k in 0..n {
+        acc += w[k] as i32 * x[k] as i32;
+    }
+    acc
+}
+
+#[cfg(all(feature = "legacy-model", target_arch = "aarch64"))]
+#[target_feature(enable = "dotprod")]
+unsafe fn i8_dot_neon(w: &[i8], x: &[i8], n: usize) -> i32 {
+    use core::arch::aarch64::*;
+    let mut acc = vdupq_n_s32(0);
+    let mut k = 0;
+    while k + 16 <= n {
+        acc = sdot(
+            acc,
+            vld1q_s8(w.as_ptr().add(k)),
+            vld1q_s8(x.as_ptr().add(k)),
+        );
+        k += 16;
+    }
+    let mut sum = vaddvq_s32(acc);
+    while k < n {
+        sum += *w.as_ptr().add(k) as i32 * *x.as_ptr().add(k) as i32;
+        k += 1;
+    }
+    sum
+}
+
 /// Single `sdot` (signed int8 dot-product, 4 MACs/lane) via inline asm — the
 /// `vdotq_s32` intrinsic is still unstable on stable Rust, but the instruction
 /// is reachable directly. Requires the `dotprod` target feature.

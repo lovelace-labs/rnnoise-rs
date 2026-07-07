@@ -43,8 +43,8 @@ All four read/write the same RAW 16-bit 48 kHz mono format.
 
 | Implementation (model) | Full frame | Front-end | Neural net | NN % | Real-time |
 |---|--:|--:|--:|--:|--:|
-| **nnnoiseless** (old, ~215 K) | **28.8 µs** | 19.0 µs | 9.8 µs | 34 % | 347× |
-| **rnnoise-rs** (old, `legacy-model`) | 38.4 µs | 29.0 µs | **9.3 µs** | 24 % | 261× |
+| **nnnoiseless** (old, ~215 K) | 27.6 µs | 19.0 µs | 9.8 µs | 36 % | 290× |
+| **rnnoise-rs** (old, `legacy-model`) | **25.9 µs** | — | — | — | **309×** |
 | **rnnoise-rs** (new, float) | 312.6 µs | 35.3 µs | 277.3 µs | 89 % | 32× |
 | **rnnoise-rs** (new, int8 + `sdot`) | **105.1 µs** | 34.0 µs | **68.9 µs** | 66 % | **95×** |
 | RNNoise C, NEON `-O3` (new) | 456.4 µs | 25.9 µs | 430.5 µs | 94 % | 22× |
@@ -91,30 +91,34 @@ instructions), but `sdot` — which does 4 int8 MACs per lane in one instruction
 cuts instruction count ~4× and gives a real **4.0× speedup on the NN** (next
 section).
 
-## Legacy model vs nnnoiseless (apples-to-apples)
+## Legacy model vs nnnoiseless — *faster* (apples-to-apples)
 
 With the `legacy-model` feature, `rnnoise-rs` runs the *same* old model as
-`nnnoiseless`, so this is a like-for-like comparison:
+`nnnoiseless`. Fair head-to-head, standalone (isolated) processes, median of 15
+runs each on the M4 Pro:
 
-| | full | front-end | neural net |
-|---|--:|--:|--:|
-| nnnoiseless | 28.8 µs | 19.0 µs | 9.8 µs |
-| rnnoise-rs `DenoiseStateV1` | 38.4 µs | 29.0 µs | **9.3 µs** |
+| | full frame | real-time |
+|---|--:|--:|
+| nnnoiseless | 27.6 µs | 290× |
+| **rnnoise-rs `DenoiseStateV1`** | **25.9 µs** | **309×** |
 
-The **neural net is a dead heat** (9.3 vs 9.8 µs) — `rnnoise-rs` is, if anything,
-marginally faster there. The whole 9.6 µs gap is in the **front-end**: our pitch
-search/bands and especially the FFT are less tuned than nnnoiseless's, which uses
-a real-input FFT (`easyfft`). We reuse the complex KISS-FFT.
+→ **`rnnoise-rs` is ~1.7 µs (≈6 %) faster.** Getting there took three steps:
 
-One front-end win is already applied: the old model needs the forward FFT of both
-the signal and the pitch-lagged signal, so we compute them as a **single** complex
-FFT (`z = signal + i·lagged`) and split the conjugate-symmetric spectrum back out
-— two real FFTs for the price of one. That took the legacy frame from 44.9 → 38.4
-µs (≈15 %) with **no** loss of parity (still 1.1e-7 vs the old model). Closing the
-rest needs a real-input FFT for the remaining forward + the inverse (see §5).
+1. **Match the FFT.** The from-scratch KISS-FFT is ~2× slower per transform than
+   nnnoiseless's `rustfft`. So the legacy model uses `realfft` (rustfft) too — the
+   exact approach nnnoiseless takes. This brought legacy 44.9 → ~27.8 µs and put
+   the front-end at parity. (KISS-FFT remains the dependency-free default for the
+   *current* model, which must stay bit-exact with the C reference.)
+2. **Tighten the pitch.** A 4-lags-at-a-time cross-correlation kernel and
+   4-wide inner products (the hottest loops of the pitch search).
+3. **Beat the NN with `sdot`.** The GRU input matmuls (the bulk of the network)
+   run as int8 `sdot` dot products with dynamically-quantized activations —
+   something nnnoiseless doesn't do. This is the decisive edge: it makes our NN
+   faster than nnnoiseless's i8×f32 matmuls while keeping the low-memory int8
+   weights (storing f32 weights was *slower* — 4× the cache traffic).
 
-Output parity (legacy): **rel. energy 1.1e-7, max 1 LSB** vs the old model —
-*tighter* than nnnoiseless's own match to the original C reference (1.7e-6).
+Output parity (legacy): **rel. energy 1.1e-5, max 21 LSB** on int16 output vs the
+old model — imperceptible; the residual is the `sdot` activation quantization.
 
 ## How to speed up — investigation
 
@@ -156,15 +160,13 @@ split across the M4 Pro's 10 perf cores. At a 10 ms frame budget the sync
 overhead is significant for one stream; most useful for offline/batch. Expected
 ~2–4× wall-clock for batch, little benefit for a single real-time stream.
 
-### 5. Tighten the front-end — *partly done*
+### 5. Tighten the front-end — ✅ *done for the legacy model*
 
-The front-end is now ~⅓ of an int8 frame (and most of a legacy frame). Done: the
-two forward FFTs are computed as one complex FFT (legacy 44.9 → 38.4 µs, no parity
-loss). Remaining: a real-input FFT for the last forward + the inverse (half the
-work again) and tighter pitch inner-products — this would close the ~10 µs
-front-end gap to nnnoiseless/C. A real-input FFT changes the front-end rounding,
-so it would relax the new model's bit-exactness bound (the legacy model already
-tolerates it).
+The legacy model now uses `realfft` (rustfft) and 4-wide pitch kernels, putting
+its front-end at parity with nnnoiseless (see the legacy section above). For the
+*current* model the FFT stays the dependency-free KISS-FFT to preserve bit-exact
+agreement with the C reference; swapping it to a real-input/SIMD FFT (relaxing
+that bound) would shave a few µs off the int8 frame too.
 
 ### 6. Smaller model — *quality trade*
 

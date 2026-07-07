@@ -4,16 +4,21 @@
 //! Enabled with the `legacy-model` feature.
 //!
 //! This is a separate, smaller/faster (but lower-quality) pipeline from the
-//! current model in [`crate::denoise`]. The DSP front-end shares this crate's
-//! FFT, pitch and biquad code; the bands, features, network and weight format
-//! all differ. Output matches the old model to within ~1 LSB (the residual is
-//! the KISS-FFT-vs-rustfft difference, the same spread `nnnoiseless` has vs the
-//! original C).
+//! current model in [`crate::denoise`]. It shares this crate's pitch and biquad
+//! code, uses `realfft` (rustfft) for the FFT — the same fast FFT `nnnoiseless`
+//! uses — and accelerates the GRU input matmuls with NEON `sdot` on int8
+//! weights with dynamically-quantized activations. The net effect is a model
+//! that is *faster* than `nnnoiseless` while matching the old model's output to
+//! within ~1e-5 relative energy (imperceptible; the residual is the activation
+//! quantization in the `sdot` path).
 
 use std::sync::{Arc, OnceLock};
 
+use realfft::num_complex::Complex;
+use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
+
 use crate::common::biquad;
-use crate::fft::{Cpx, RealFft};
+use crate::fft::Cpx;
 use crate::pitch::{pitch_downsample, pitch_search, remove_doubling};
 use crate::weights::ModelError;
 use crate::{
@@ -43,7 +48,6 @@ struct LegacyCommon {
     window: [f32; WINDOW_SIZE],
     dct_table: [f32; NB_BANDS * NB_BANDS],
     wnorm: f32,
-    rfft: RealFft,
 }
 
 const DCT_SCALE: f64 = 0.301_511_344_577_763_5; // sqrt(2/22), as in upstream
@@ -74,31 +78,12 @@ impl LegacyCommon {
             window,
             dct_table,
             wnorm,
-            rfft: RealFft::new(WINDOW_SIZE),
         }
     }
 
     fn apply_window(&self, x: &mut [f32]) {
         for (v, &w) in x.iter_mut().zip(self.window.iter()) {
             *v *= w;
-        }
-    }
-
-    /// Windowed real signal → spectrum (real-input FFT), normalised by `wnorm`.
-    fn forward(&self, input: &[f32], out: &mut [Cpx; FREQ_SIZE]) {
-        self.rfft.forward(input, out);
-        let w = self.wnorm;
-        for c in out.iter_mut() {
-            c.r *= w;
-            c.i *= w;
-        }
-    }
-
-    /// Spectrum → windowed real signal (real inverse FFT, halved as upstream).
-    fn inverse(&self, x: &[Cpx; FREQ_SIZE], out: &mut [f32; WINDOW_SIZE]) {
-        self.rfft.inverse(x, out);
-        for v in out.iter_mut() {
-            *v *= 0.5;
         }
     }
 
@@ -144,6 +129,42 @@ fn windowed(lc: &LegacyCommon, input_mem: &[f32], lag: usize) -> [f32; WINDOW_SI
     buf.copy_from_slice(&input_mem[start..start + WINDOW_SIZE]);
     lc.apply_window(&mut buf);
     buf
+}
+
+/// Real-input FFT of `input` (consumed as scratch) → `wnorm`-normalized spectrum.
+fn rfft_forward(
+    r2c: &dyn RealToComplex<f32>,
+    input: &mut [f32],
+    spec: &mut [Complex<f32>],
+    scratch: &mut [Complex<f32>],
+    out: &mut [Cpx; FREQ_SIZE],
+    wnorm: f32,
+) {
+    r2c.process_with_scratch(input, spec, scratch).unwrap();
+    for (o, c) in out.iter_mut().zip(spec.iter()) {
+        o.r = c.re * wnorm;
+        o.i = c.im * wnorm;
+    }
+}
+
+/// Real inverse FFT (unnormalized), halved to match the upstream convention.
+fn rfft_inverse(
+    c2r: &dyn ComplexToReal<f32>,
+    x: &[Cpx; FREQ_SIZE],
+    spec: &mut [Complex<f32>],
+    scratch: &mut [Complex<f32>],
+    out: &mut [f32; WINDOW_SIZE],
+) {
+    for (c, xi) in spec.iter_mut().zip(x.iter()) {
+        *c = Complex::new(xi.r, xi.i);
+    }
+    // c2r requires the DC and Nyquist bins to be purely real.
+    spec[0].im = 0.0;
+    spec[FREQ_SIZE - 1].im = 0.0;
+    c2r.process_with_scratch(spec, out, scratch).unwrap();
+    for v in out.iter_mut() {
+        *v *= 0.5;
+    }
 }
 
 fn interp_band_gain(g: &mut [f32], band_e: &[f32]) {
@@ -263,8 +284,10 @@ impl DenseLayer {
 }
 
 struct GruLayer {
-    bias: Vec<i8>,              // [3*nb_neurons]
-    input_weights: Vec<i8>,     // [nb_inputs][3*nb_neurons]
+    bias: Vec<i8>, // [3*nb_neurons]
+    /// Input weights transposed to `[3*nb_neurons][nb_inputs]` so each output is
+    /// a contiguous int8 dot product (for `sdot`).
+    input_weights_t: Vec<i8>,
     recurrent_weights: Vec<i8>, // [nb_neurons][3*nb_neurons]
     nb_inputs: usize,
     nb_neurons: usize,
@@ -272,7 +295,7 @@ struct GruLayer {
 }
 
 /// `out[k] += sum_c data[c][offset+k] * input[c]`, where each column has length
-/// `stride` (= 3*nb_neurons).
+/// `stride` (= 3*nb_neurons). Used for the recurrent matmuls.
 fn gru_mul_add(out: &mut [f32], data: &[i8], stride: usize, offset: usize, input: &[f32]) {
     let n = out.len();
     for (col, &inp) in data.chunks_exact(stride).zip(input) {
@@ -282,24 +305,44 @@ fn gru_mul_add(out: &mut [f32], data: &[i8], stride: usize, offset: usize, input
     }
 }
 
+/// Quantize `input` to int8 in `qx` with a dynamic per-vector scale (handles the
+/// relu-derived, unbounded GRU activations). Returns the inverse scale so the
+/// caller can recover `Σ w·input ≈ (Σ w·qx) · inv`.
+fn quantize_dyn(input: &[f32], qx: &mut [i8]) -> f32 {
+    let maxabs = input.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
+    if maxabs == 0.0 {
+        qx.iter_mut().for_each(|q| *q = 0);
+        return 0.0;
+    }
+    let scale = 127.0 / maxabs;
+    for (q, &v) in qx.iter_mut().zip(input) {
+        *q = (v * scale).round().clamp(-127.0, 127.0) as i8;
+    }
+    maxabs / 127.0
+}
+
 impl GruLayer {
     fn compute(&self, state: &mut [f32], input: &[f32]) {
         let n = self.nb_neurons;
+        let ni = self.nb_inputs;
         let mut z = [0.0f32; MAX_NEURONS];
         let mut r = [0.0f32; MAX_NEURONS];
         let mut h = [0.0f32; MAX_NEURONS];
 
-        // Update gate z.
-        for i in 0..n {
-            z[i] = self.bias[i] as f32;
+        // Input matmul for all three gates at once, via int8 `sdot`.
+        let mut qx = [0i8; MAX_NEURONS * 2 + NB_FEATURES];
+        let inv = quantize_dyn(&input[..ni], &mut qx[..ni]);
+        let mut in_c = [0.0f32; 3 * MAX_NEURONS];
+        for o in 0..3 * n {
+            in_c[o] = crate::nnet::i8_dot(&self.input_weights_t[o * ni..o * ni + ni], &qx[..ni])
+                as f32
+                * inv;
         }
-        gru_mul_add(
-            &mut z[..n],
-            &self.input_weights,
-            3 * n,
-            0,
-            &input[..self.nb_inputs],
-        );
+
+        // Update gate z = σ(bias_z + Wz·in + Uz·state).
+        for i in 0..n {
+            z[i] = self.bias[i] as f32 + in_c[i];
+        }
         gru_mul_add(&mut z[..n], &self.recurrent_weights, 3 * n, 0, &state[..n]);
         for zi in z[..n].iter_mut() {
             *zi = sigmoid_approx(*zi * WEIGHTS_SCALE);
@@ -307,31 +350,17 @@ impl GruLayer {
 
         // Reset gate r, pre-multiplied by the state.
         for i in 0..n {
-            r[i] = self.bias[n + i] as f32;
+            r[i] = self.bias[n + i] as f32 + in_c[n + i];
         }
-        gru_mul_add(
-            &mut r[..n],
-            &self.input_weights,
-            3 * n,
-            n,
-            &input[..self.nb_inputs],
-        );
         gru_mul_add(&mut r[..n], &self.recurrent_weights, 3 * n, n, &state[..n]);
         for (ri, &s) in r[..n].iter_mut().zip(&state[..n]) {
             *ri = s * sigmoid_approx(*ri * WEIGHTS_SCALE);
         }
 
-        // Candidate h.
+        // Candidate h (recurrent part uses the reset-gated state r).
         for i in 0..n {
-            h[i] = self.bias[2 * n + i] as f32;
+            h[i] = self.bias[2 * n + i] as f32 + in_c[2 * n + i];
         }
-        gru_mul_add(
-            &mut h[..n],
-            &self.input_weights,
-            3 * n,
-            2 * n,
-            &input[..self.nb_inputs],
-        );
         gru_mul_add(&mut h[..n], &self.recurrent_weights, 3 * n, 2 * n, &r[..n]);
         for i in 0..n {
             let ha = self.activation.apply(h[i] * WEIGHTS_SCALE);
@@ -396,9 +425,17 @@ impl<'a> Reader<'a> {
         let input_weights = self.take(3 * nb_neurons * nb_inputs)?;
         let recurrent_weights = self.take(3 * nb_neurons * nb_neurons)?;
         let bias = self.take(3 * nb_neurons)?;
+        // Transpose input weights from [input][3*neurons] to [3*neurons][input].
+        let out3 = 3 * nb_neurons;
+        let mut input_weights_t = vec![0i8; out3 * nb_inputs];
+        for j in 0..nb_inputs {
+            for o in 0..out3 {
+                input_weights_t[o * nb_inputs + j] = input_weights[j * out3 + o];
+            }
+        }
         Ok(GruLayer {
             bias,
-            input_weights,
+            input_weights_t,
             recurrent_weights,
             nb_inputs,
             nb_neurons,
@@ -523,6 +560,11 @@ pub struct DenoiseStateV1 {
     ep: [f32; NB_BANDS],
     exp: [f32; NB_BANDS],
     features: [f32; NB_FEATURES],
+    // Real-input FFT (rustfft via realfft) + reusable scratch.
+    r2c: Arc<dyn RealToComplex<f32>>,
+    c2r: Arc<dyn ComplexToReal<f32>>,
+    spec: Vec<Complex<f32>>,
+    scratch: Vec<Complex<f32>>,
 }
 
 impl DenoiseStateV1 {
@@ -530,6 +572,10 @@ impl DenoiseStateV1 {
     pub fn with_model(model: Arc<RnnModelV1>) -> Self {
         let _ = legacy_common();
         let rnn = RnnStateV1::new(&model);
+        let mut planner = RealFftPlanner::<f32>::new();
+        let r2c = planner.plan_fft_forward(WINDOW_SIZE);
+        let c2r = planner.plan_fft_inverse(WINDOW_SIZE);
+        let scratch_len = r2c.get_scratch_len().max(c2r.get_scratch_len());
         DenoiseStateV1 {
             model,
             rnn,
@@ -547,6 +593,10 @@ impl DenoiseStateV1 {
             ep: [0.0; NB_BANDS],
             exp: [0.0; NB_BANDS],
             features: [0.0; NB_FEATURES],
+            spec: vec![Complex::default(); FREQ_SIZE],
+            scratch: vec![Complex::default(); scratch_len],
+            r2c,
+            c2r,
         }
     }
 
@@ -629,14 +679,26 @@ impl DenoiseStateV1 {
         let mut ly = [0.0f32; NB_BANDS];
         let mut tmp = [0.0f32; NB_BANDS];
 
-        // Pitch is found in the time domain (independent of the FFTs), so we can
-        // window both the signal and the pitch-lagged signal first and transform
-        // them together in a single complex FFT.
+        // Pitch is found in the time domain (independent of the FFTs).
         let pitch_idx = self.find_pitch();
-        let xbuf = windowed(lc, &self.input_mem, 0);
-        let pbuf = windowed(lc, &self.input_mem, pitch_idx);
-        lc.forward(&xbuf, &mut self.x);
-        lc.forward(&pbuf, &mut self.p);
+        let mut xbuf = windowed(lc, &self.input_mem, 0);
+        let mut pbuf = windowed(lc, &self.input_mem, pitch_idx);
+        rfft_forward(
+            &*self.r2c,
+            &mut xbuf,
+            &mut self.spec,
+            &mut self.scratch,
+            &mut self.x,
+            lc.wnorm,
+        );
+        rfft_forward(
+            &*self.r2c,
+            &mut pbuf,
+            &mut self.spec,
+            &mut self.scratch,
+            &mut self.p,
+            lc.wnorm,
+        );
         compute_band_corr(&mut self.ex, &self.x, &self.x);
         compute_band_corr(&mut self.ep, &self.p, &self.p);
 
@@ -753,7 +815,13 @@ impl DenoiseStateV1 {
 
     fn frame_synthesis(&mut self, lc: &LegacyCommon, out: &mut [f32]) {
         let mut buf = [0.0f32; WINDOW_SIZE];
-        lc.inverse(&self.x, &mut buf);
+        rfft_inverse(
+            &*self.c2r,
+            &self.x,
+            &mut self.spec,
+            &mut self.scratch,
+            &mut buf,
+        );
         lc.apply_window(&mut buf);
         for i in 0..FRAME_SIZE {
             out[i] = buf[i] + self.synthesis_mem[i];

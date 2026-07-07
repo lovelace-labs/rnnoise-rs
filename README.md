@@ -22,8 +22,16 @@ architecture: a 32-band DSP front-end feeding a **2×Conv1D + 3×GRU**,
   methodology and a vs-`nnnoiseless` comparison are in [BENCHMARKS.md](BENCHMARKS.md).
 - **Self-contained:** the default model is embedded; no network or build step.
 - **No dependencies** in the core library. Pure safe Rust (the only `unsafe` is
-  in the optional C ABI).
+  in the optional C ABI and the optional NEON `sdot` kernel).
 - Optional **C ABI** (`capi` feature) compatible with `rnnoise.h`.
+
+## Documentation
+
+Full long-form docs live in [`doc/`](doc/README.md): the
+[algorithm & architecture](doc/architecture.md), the [API guide](doc/api.md),
+[models & weight formats](doc/models.md), a contributor [internals](doc/internals.md)
+tour, [parity methodology](doc/parity.md), and [performance](doc/performance.md) /
+[building](doc/building.md). Generated API docs: `cargo doc --open`.
 
 ## Usage
 
@@ -119,11 +127,13 @@ st.process_frame(&mut out, &[0.0f32; FRAME_SIZE]);
 # }
 ```
 
-It matches the old model to ~1 LSB (rel. energy `1.1e-7`). It runs ~261× real
-time (≈38 µs/frame); its **neural net is as fast as nnnoiseless's** (9.3 vs
-9.8 µs) — the remaining gap is our front-end FFT (we reuse the complex KISS-FFT
-rather than a real-input FFT). See [BENCHMARKS.md](BENCHMARKS.md). Use the
-default (current) model for quality; use this for minimal size/latency.
+It is **faster than `nnnoiseless`** on the same model — ≈25.9 µs/frame (309× real
+time) vs nnnoiseless's ≈27.6 µs, a fair head-to-head median (see
+[BENCHMARKS.md](BENCHMARKS.md)). It gets there by using the same fast FFT
+(`realfft`/rustfft, pulled in only with this feature), tighter pitch kernels, and
+NEON `sdot` int8 GRU matmuls. Output matches the old model to ~1e-5 relative
+energy (imperceptible). Use the default (current) model for quality; use this for
+minimal size/latency.
 
 ## How it works
 
