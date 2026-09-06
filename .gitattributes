@@ -1,0 +1,285 @@
+# =============================================================================
+# Git Attributes
+# =============================================================================
+#
+# Path-specific settings for Git operations.
+# Documentation: https://git-scm.com/docs/gitattributes
+#
+# This file is portable - copy to other repos without modification.
+#
+# -----------------------------------------------------------------------------
+# How It Works
+# -----------------------------------------------------------------------------
+#
+# Git attributes control:
+#   - Line ending normalization (text, eol)
+#   - Diff output format (diff)
+#   - Merge strategy (merge)
+#   - Binary file handling (binary)
+#   - Git LFS tracking (filter=lfs)
+#   - GitHub language statistics (linguist-*)
+#
+# -----------------------------------------------------------------------------
+# Common Attributes
+# -----------------------------------------------------------------------------
+#
+#   text              Normalize line endings on commit
+#   text=auto         Let Git detect text vs binary
+#   text eol=lf       Force LF line endings (Unix)
+#   text eol=crlf     Force CRLF line endings (Windows)
+#   binary            Treat as binary (no line ending conversion)
+#   diff=python       Use Python-specific diff algorithm
+#   -diff             Exclude from diffs
+#   merge=ours        Use "ours" strategy for merge conflicts
+#
+# =============================================================================
+
+
+# =============================================================================
+# Default Behavior
+# =============================================================================
+#
+# Auto-detect text files and normalize line endings to LF on commit.
+# Check out with native line endings based on core.autocrlf setting.
+#
+# -----------------------------------------------------------------------------
+
+* text=auto
+
+
+# =============================================================================
+# Source Code - Python
+# =============================================================================
+#
+# diff=python enables Python-aware diff output showing function names
+# in the diff hunk headers: @@ -10,5 +10,6 @@ def my_function():
+#
+# -----------------------------------------------------------------------------
+
+*.py      text eol=lf diff=python
+*.pyx     text eol=lf diff=python
+*.pyi     text eol=lf diff=python
+*.pyw     text eol=lf diff=python
+
+
+# =============================================================================
+# Source Code - JavaScript / TypeScript
+# =============================================================================
+
+*.js      text eol=lf
+*.jsx     text eol=lf
+*.ts      text eol=lf
+*.tsx     text eol=lf
+*.mjs     text eol=lf
+*.cjs     text eol=lf
+
+
+# =============================================================================
+# Source Code - Web
+# =============================================================================
+
+*.css     text eol=lf
+*.scss    text eol=lf
+*.sass    text eol=lf
+*.less    text eol=lf
+*.html    text eol=lf diff=html
+*.htm     text eol=lf diff=html
+*.jinja   text eol=lf
+*.jinja2  text eol=lf
+*.vue     text eol=lf
+
+
+# =============================================================================
+# Configuration Files
+# =============================================================================
+
+*.ini          text eol=lf
+*.cfg          text eol=lf
+*.conf         text eol=lf
+*.toml         text eol=lf
+*.yaml         text eol=lf
+*.yml          text eol=lf
+*.json         text eol=lf
+*.xml          text eol=lf
+*.csv          text eol=lf
+*.env          text eol=lf
+*.env.*        text eol=lf
+.editorconfig  text eol=lf
+.gitattributes text eol=lf
+.gitignore     text eol=lf
+.gitmodules    text eol=lf
+.npmrc         text eol=lf
+.nvmrc         text eol=lf
+
+
+# =============================================================================
+# Documentation
+# =============================================================================
+
+*.md           text eol=lf diff=markdown
+*.markdown     text eol=lf diff=markdown
+*.rst          text eol=lf
+*.txt          text eol=lf
+LICENSE        text eol=lf
+LICENSE.*      text eol=lf
+CHANGELOG*     text eol=lf
+README*        text eol=lf
+CONTRIBUTING*  text eol=lf
+
+
+# =============================================================================
+# Shell Scripts - Unix
+# =============================================================================
+#
+# Unix scripts MUST have LF line endings or they won't execute.
+#
+# -----------------------------------------------------------------------------
+
+*.sh           text eol=lf
+*.bash         text eol=lf
+*.zsh          text eol=lf
+Makefile       text eol=lf
+Makefile.*     text eol=lf
+Procfile       text eol=lf
+
+
+# =============================================================================
+# Shell Scripts - Windows
+# =============================================================================
+#
+# Windows batch files need CRLF line endings.
+#
+# -----------------------------------------------------------------------------
+
+*.bat          text eol=crlf
+*.cmd          text eol=crlf
+*.ps1          text eol=lf
+
+
+# =============================================================================
+# Docker & CI/CD
+# =============================================================================
+
+Dockerfile          text eol=lf
+Dockerfile.*        text eol=lf
+*.dockerfile        text eol=lf
+docker-compose*.yml text eol=lf
+.github/**          text eol=lf
+.gitlab-ci.yml      text eol=lf
+.travis.yml         text eol=lf
+
+
+# =============================================================================
+# Binary Files - Archives
+# =============================================================================
+#
+# These should never have line ending conversion applied.
+#
+# -----------------------------------------------------------------------------
+
+*.7z       binary
+*.gz       binary
+*.tar      binary
+*.tgz      binary
+*.tar.gz   binary
+*.zip      binary
+*.bz2      binary
+*.xz       binary
+
+
+# =============================================================================
+# Binary Files - Python
+# =============================================================================
+
+*.pyc      binary
+*.pyo      binary
+*.pyd      binary
+*.whl      binary
+*.egg      binary
+
+
+# =============================================================================
+# Binary Files - Images
+# =============================================================================
+
+*.png      binary
+*.jpg      binary
+*.jpeg     binary
+*.gif      binary
+*.ico      binary
+*.webp     binary
+*.svg      binary
+*.bmp      binary
+*.tiff     binary
+
+
+# =============================================================================
+# Binary Files - Fonts
+# =============================================================================
+
+*.woff     binary
+*.woff2    binary
+*.ttf      binary
+*.eot      binary
+*.otf      binary
+
+
+# =============================================================================
+# Binary Files - Other
+# =============================================================================
+
+*.pdf      binary
+*.sqlite3  binary
+*.db       binary
+
+
+# =============================================================================
+# Git LFS (Large File Storage)
+# =============================================================================
+#
+# Large files that should be stored in Git LFS instead of the repository.
+# Configure LFS with: git lfs track "*.psd"
+#
+# -----------------------------------------------------------------------------
+
+*.json.br filter=lfs diff=lfs merge=lfs -text
+
+
+# =============================================================================
+# GitHub Linguist
+# =============================================================================
+#
+# Controls GitHub's language statistics and syntax highlighting.
+# Documentation: https://github.com/github/linguist
+#
+# linguist-language=X       Override detected language
+# linguist-generated=true   Mark as generated (excluded from stats)
+# linguist-vendored=true    Mark as vendored (excluded from stats)
+# linguist-documentation    Mark as documentation
+# linguist-detectable=false Exclude from language detection
+#
+# -----------------------------------------------------------------------------
+
+# Ensure Python is detected correctly
+*.py                   linguist-language=Python
+*.pyi                  linguist-language=Python
+
+# Mark auto-generated files (excluded from language stats)
+poetry.lock            linguist-generated=true
+package-lock.json      linguist-generated=true
+yarn.lock              linguist-generated=true
+pnpm-lock.yaml         linguist-generated=true
+
+# Mark generated directories
+dist/**                linguist-generated=true
+build/**               linguist-generated=true
+htmlcov/**             linguist-generated=true
+site/**                linguist-generated=true
+
+# Ensure tests count toward statistics (not vendored)
+tst/**                 linguist-vendored=false
+tests/**               linguist-vendored=false
+
+# Mark documentation
+doc/**                 linguist-documentation=true
+docs/**                linguist-documentation=true

@@ -1,0 +1,16 @@
+cff-version: 1.2.0
+title: rnnoise-rs
+abstract: Idiomatic Rust port of Xiph RNNoise (current conv+GRU model) for real-time speech noise suppression.
+version: 0.1.0
+date-released: 2026-09-06
+url: "https://github.com/lovelace-labs/rnnoise-rs"
+repository-code: "https://github.com/lovelace-labs/rnnoise-rs"
+license: BSD-3-Clause
+license-url: "https://github.com/lovelace-labs/rnnoise-rs/blob/dev/LICENSE"
+type: software
+authors:
+  - given-names: Lars Bastiaan
+    family-names: van Vianen
+    email: lars@lovelacelabs.ai
+    affiliation: Lovelace Labs
+    orcid: https://orcid.org/0000-0002-8790-8630

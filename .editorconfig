@@ -1,0 +1,393 @@
+# =============================================================================
+# EditorConfig
+# =============================================================================
+#
+# Cross-editor configuration for consistent coding styles.
+# Documentation: https://editorconfig.org
+#
+# -----------------------------------------------------------------------------
+# How It Works
+# -----------------------------------------------------------------------------
+#
+# EditorConfig defines coding styles (indentation, line endings, etc.) that
+# are automatically applied by supported editors when opening files.
+#
+# Supported editors (native or via plugin):
+#   - VS Code (EditorConfig extension)
+#   - JetBrains IDEs (native)
+#   - Vim/Neovim (editorconfig plugin)
+#   - Sublime Text (EditorConfig plugin)
+#   - Atom, Emacs, Notepad++, and many more
+#
+# -----------------------------------------------------------------------------
+# Configuration Hierarchy
+# -----------------------------------------------------------------------------
+#
+# EditorConfig searches upward from the file being edited until it finds
+# a file with `root = true` or reaches the filesystem root.
+#
+# Settings cascade - more specific patterns override general ones:
+#   [*]        → All files (defaults)
+#   [*.py]     → Python files (overrides *)
+#   [Makefile] → Specific file (overrides *)
+#
+# -----------------------------------------------------------------------------
+# Available Properties
+# -----------------------------------------------------------------------------
+#
+#   charset:                   utf-8, utf-8-bom, utf-16be, utf-16le, latin1
+#   end_of_line:               lf (Unix), crlf (Windows), cr (old Mac)
+#   indent_style:              space, tab
+#   indent_size:               Number of spaces (or "tab" to use tab_width)
+#   tab_width:                 Width of tab character (default: indent_size)
+#   trim_trailing_whitespace:  true, false
+#   insert_final_newline:      true, false
+#   max_line_length:           Number or "off"
+#
+# =============================================================================
+
+
+# =============================================================================
+# Root Marker
+# =============================================================================
+#
+# Stop searching for .editorconfig files in parent directories.
+# This file is the authoritative config for this project.
+#
+# -----------------------------------------------------------------------------
+
+root = true
+
+
+# =============================================================================
+# Global Defaults
+# =============================================================================
+#
+# Applied to all files unless overridden by more specific patterns.
+#
+# charset = utf-8:
+#   UTF-8 is the universal standard for source code
+#
+# end_of_line = lf:
+#   Unix-style line endings (LF) for cross-platform consistency
+#   Git can convert CRLF on Windows via core.autocrlf
+#
+# indent_style = space:
+#   Spaces render consistently across all editors and viewers
+#
+# indent_size = 4:
+#   4 spaces is the default for Python (PEP 8) and many languages
+#
+# insert_final_newline = true:
+#   POSIX standard - files should end with a newline
+#   Prevents "No newline at end of file" warnings in diffs
+#
+# trim_trailing_whitespace = true:
+#   Removes invisible characters that clutter diffs
+#
+# max_line_length = 79:
+#   PEP 8 recommendation for Python, works well for side-by-side diffs
+#
+# -----------------------------------------------------------------------------
+
+[*]
+charset                    = utf-8
+end_of_line                = lf
+indent_style               = space
+indent_size                = 4
+insert_final_newline       = true
+trim_trailing_whitespace   = true
+max_line_length            = 79
+
+
+# =============================================================================
+# Python
+# =============================================================================
+#
+# PEP 8 Style Guide: https://peps.python.org/pep-0008/
+#
+# - 4 spaces per indentation level
+# - 79 characters max line length (72 for docstrings)
+#
+# -----------------------------------------------------------------------------
+
+[*.py]
+indent_style               = space
+indent_size                = 4
+max_line_length            = 79
+
+
+# =============================================================================
+# JavaScript / TypeScript
+# =============================================================================
+#
+# 4 spaces to match Python conventions in this project.
+# (Many JS projects use 2 spaces - adjust to your preference)
+#
+# -----------------------------------------------------------------------------
+
+[*.{js,jsx,ts,tsx,mjs,cjs}]
+indent_style               = space
+indent_size                = 4
+
+
+# =============================================================================
+# JSON
+# =============================================================================
+#
+# 4 spaces for readability and consistency with Python.
+# Note: JSON does not support comments.
+#
+# -----------------------------------------------------------------------------
+
+[*.json]
+indent_style               = space
+indent_size                = 4
+
+
+# =============================================================================
+# YAML / YML
+# =============================================================================
+#
+# 2 spaces is the standard for YAML files.
+# .sls = SaltStack state files (YAML-based)
+#
+# -----------------------------------------------------------------------------
+
+[*.{yaml,yml,sls}]
+indent_style               = space
+indent_size                = 2
+
+
+# =============================================================================
+# TOML
+# =============================================================================
+#
+# Used for pyproject.toml, Cargo.toml, etc.
+#
+# -----------------------------------------------------------------------------
+
+[*.toml]
+indent_style               = space
+indent_size                = 4
+
+
+# =============================================================================
+# HTML / Templates
+# =============================================================================
+#
+# 2 spaces is common for HTML/templates due to deep nesting.
+# Jinja2 templates inherit from this pattern.
+#
+# -----------------------------------------------------------------------------
+
+[*.{html,htm,jinja,jinja2,njk}]
+indent_style               = space
+indent_size                = 2
+
+
+# =============================================================================
+# CSS / SCSS / Sass
+# =============================================================================
+#
+# 4 spaces to match project conventions.
+#
+# -----------------------------------------------------------------------------
+
+[*.{css,scss,sass,less}]
+indent_style               = space
+indent_size                = 4
+
+
+# =============================================================================
+# Markdown
+# =============================================================================
+#
+# trim_trailing_whitespace = false:
+#   Two trailing spaces create a <br> line break in Markdown
+#
+# max_line_length = off:
+#   Markdown paragraphs can be long; let the renderer handle wrapping
+#
+# -----------------------------------------------------------------------------
+
+[*.md]
+trim_trailing_whitespace   = false
+max_line_length            = off
+
+
+# =============================================================================
+# reStructuredText
+# =============================================================================
+#
+# 3-space indent is conventional for RST directives:
+#   .. directive::
+#      content here
+#
+# -----------------------------------------------------------------------------
+
+[*.rst]
+indent_style               = space
+indent_size                = 3
+max_line_length            = 79
+
+
+# =============================================================================
+# Makefile
+# =============================================================================
+#
+# IMPORTANT: Makefiles REQUIRE tabs for recipe indentation.
+# Using spaces will cause "missing separator" errors.
+#
+# -----------------------------------------------------------------------------
+
+[Makefile]
+indent_style               = tab
+tab_width                  = 4
+
+[*.mk]
+indent_style               = tab
+tab_width                  = 4
+
+
+# =============================================================================
+# Shell Scripts
+# =============================================================================
+#
+# Google Shell Style Guide recommends 2 spaces, but 4 is fine.
+# Consistency within the project matters more.
+#
+# -----------------------------------------------------------------------------
+
+[*.sh]
+indent_style               = space
+indent_size                = 4
+
+[*.bash]
+indent_style               = space
+indent_size                = 4
+
+
+# =============================================================================
+# SQL
+# =============================================================================
+#
+# 4 spaces for SQL statements and blocks.
+#
+# -----------------------------------------------------------------------------
+
+[*.sql]
+indent_style               = space
+indent_size                = 4
+
+
+# =============================================================================
+# Configuration Files
+# =============================================================================
+#
+# INI-style config files (.ini, .cfg, .conf)
+#
+# -----------------------------------------------------------------------------
+
+[*.{ini,cfg,conf}]
+indent_style               = space
+indent_size                = 4
+
+
+# =============================================================================
+# XML
+# =============================================================================
+#
+# 2 spaces due to typically deep nesting in XML documents.
+#
+# -----------------------------------------------------------------------------
+
+[*.xml]
+indent_style               = space
+indent_size                = 2
+
+
+# =============================================================================
+# GraphQL
+# =============================================================================
+#
+# 2 spaces is common for GraphQL schemas and queries.
+#
+# -----------------------------------------------------------------------------
+
+[*.{graphql,gql}]
+indent_style               = space
+indent_size                = 2
+
+
+# =============================================================================
+# Protocol Buffers
+# =============================================================================
+#
+# Google's style guide for .proto files uses 2 spaces.
+#
+# -----------------------------------------------------------------------------
+
+[*.proto]
+indent_style               = space
+indent_size                = 2
+
+
+# =============================================================================
+# Docker
+# =============================================================================
+#
+# Dockerfile instructions and multi-line commands.
+#
+# -----------------------------------------------------------------------------
+
+[Dockerfile*]
+indent_style               = space
+indent_size                = 4
+
+[docker-compose*.{yml,yaml}]
+indent_style               = space
+indent_size                = 2
+
+
+# =============================================================================
+# Web Server Configuration
+# =============================================================================
+#
+# Nginx, Apache, and similar server configs.
+#
+# -----------------------------------------------------------------------------
+
+[{nginx.conf,*.nginx}]
+indent_style               = space
+indent_size                = 4
+
+[*.apache]
+indent_style               = space
+indent_size                = 4
+
+
+# =============================================================================
+# Git Configuration Files
+# =============================================================================
+#
+# .gitignore, .gitattributes, .gitmodules, etc.
+#
+# -----------------------------------------------------------------------------
+
+[.git*]
+indent_style               = space
+indent_size                = 4
+
+
+# =============================================================================
+# Environment Files
+# =============================================================================
+#
+# .env files typically don't need indentation, but setting for consistency.
+#
+# -----------------------------------------------------------------------------
+
+[.env*]
+indent_style               = space
+indent_size                = 4

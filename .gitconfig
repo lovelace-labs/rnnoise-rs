@@ -1,0 +1,217 @@
+# =============================================================================
+# Git Configuration (Repository-Level)
+# =============================================================================
+#
+# Repository-specific Git settings.
+# Documentation: https://git-scm.com/docs/git-config
+#
+# This file is portable - copy to other repos without modification.
+#
+# -----------------------------------------------------------------------------
+# Configuration Hierarchy
+# -----------------------------------------------------------------------------
+#
+# Git reads config from multiple locations (highest to lowest priority):
+#
+#   1. Command line:  git -c user.name="..."
+#   2. Repository:    .git/config (local)
+#   3. User:          ~/.gitconfig or ~/.config/git/config (global)
+#   4. System:        /etc/gitconfig (system)
+#
+# This file (.gitconfig) is for SHARED repository settings that should
+# apply to all contributors. It's included via:
+#
+#   git config --local include.path ../.gitconfig
+#
+# Or automatically if Git is configured to use it.
+#
+# -----------------------------------------------------------------------------
+# Usage
+# -----------------------------------------------------------------------------
+#
+# To apply these settings to your local clone:
+#
+#   git config --local include.path ../.gitconfig
+#
+# To view effective configuration:
+#
+#   git config --list --show-origin
+#
+# =============================================================================
+
+
+# =============================================================================
+# [init] - Repository Initialization
+# =============================================================================
+
+[init]
+
+# ---------------------------------------------------------------------------
+# defaultBranch
+# ---------------------------------------------------------------------------
+# Default branch name for new repositories.
+# "dev" is used as the main development branch in this project.
+#
+# Alternatives: main, master, trunk
+#
+defaultBranch = dev
+
+
+# =============================================================================
+# [core] - Core Git Behavior
+# =============================================================================
+
+[core]
+
+# ---------------------------------------------------------------------------
+# autocrlf
+# ---------------------------------------------------------------------------
+# Line ending handling for cross-platform compatibility.
+#
+#   input:  Convert CRLF to LF on commit, no conversion on checkout
+#           Best for Unix/macOS or repos shared across platforms
+#
+#   true:   Convert CRLF to LF on commit, LF to CRLF on checkout
+#           Best for Windows-only development
+#
+#   false:  No conversion (use with .gitattributes for precise control)
+#
+autocrlf = input
+
+# ---------------------------------------------------------------------------
+# safecrlf
+# ---------------------------------------------------------------------------
+# Verify line ending conversion is reversible.
+#
+#   true:   Reject commits that would cause irreversible conversion
+#   warn:   Print warning but allow commit
+#   false:  No checking
+#
+safecrlf = true
+
+
+# =============================================================================
+# [pull] - Pull Behavior
+# =============================================================================
+
+[pull]
+
+# ---------------------------------------------------------------------------
+# rebase
+# ---------------------------------------------------------------------------
+# Use rebase instead of merge when pulling.
+#
+#   true:         Always rebase (git pull --rebase)
+#   false:        Always merge (default Git behavior)
+#   interactive:  Interactive rebase (git pull --rebase=interactive)
+#   merges:       Rebase but preserve merge commits
+#
+# Rebasing creates a cleaner, linear history without merge commits.
+#
+rebase = true
+
+
+# =============================================================================
+# [push] - Push Behavior
+# =============================================================================
+
+[push]
+
+# ---------------------------------------------------------------------------
+# autoSetupRemote
+# ---------------------------------------------------------------------------
+# Automatically set up tracking for new branches on push.
+#
+# Without this, first push requires:
+#   git push --set-upstream origin branch-name
+#
+# With this enabled:
+#   git push  # Just works
+#
+autoSetupRemote = true
+
+# ---------------------------------------------------------------------------
+# default
+# ---------------------------------------------------------------------------
+# Default push behavior when no refspec is given.
+#
+#   current:   Push current branch to same-named remote branch
+#   upstream:  Push to configured upstream branch
+#   simple:    Like upstream, but refuse if names differ (safest)
+#   matching:  Push all matching branches (old default, not recommended)
+#
+default = current
+
+
+# =============================================================================
+# [fetch] - Fetch Behavior
+# =============================================================================
+
+[fetch]
+
+# ---------------------------------------------------------------------------
+# prune
+# ---------------------------------------------------------------------------
+# Remove remote-tracking branches that no longer exist on the remote.
+# Equivalent to: git fetch --prune
+#
+# prune = true
+
+
+# =============================================================================
+# [merge] - Merge Behavior
+# =============================================================================
+
+[merge]
+
+# ---------------------------------------------------------------------------
+# ff
+# ---------------------------------------------------------------------------
+# Fast-forward behavior for merges.
+#
+#   true:   Fast-forward when possible (default)
+#   false:  Never fast-forward, always create merge commit
+#   only:   Only allow fast-forward merges
+#
+# ff = true
+
+
+# =============================================================================
+# [diff] - Diff Output
+# =============================================================================
+
+[diff]
+
+# ---------------------------------------------------------------------------
+# colorMoved
+# ---------------------------------------------------------------------------
+# Highlight moved lines in diffs.
+#
+#   default:  Color moved blocks
+#   plain:    Color moved lines
+#   blocks:   Color moved blocks (ignore whitespace changes)
+#   zebra:    Alternating colors for moved blocks
+#
+# colorMoved = zebra
+
+
+# =============================================================================
+# [alias] - Git Aliases
+# =============================================================================
+#
+# Shorthand commands. Examples:
+#
+#   git st    → git status
+#   git co    → git checkout
+#   git br    → git branch
+#   git ci    → git commit
+#   git lg    → Pretty log graph
+#
+# Note: Personal aliases should go in ~/.gitconfig, not here.
+#
+# [alias]
+# st = status
+# co = checkout
+# br = branch
+# ci = commit
+# lg = log --oneline --graph --decorate

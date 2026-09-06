@@ -1,0 +1,50 @@
+# Build artifacts
+target/
+*.rs.bk
+
+# Model weights & quantized checkpoints — never copy into a build context
+*.gguf
+*.safetensors
+*.pt
+*.bin
+*.onnx
+models/
+*.wav
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*~
+
+# Docs (not needed in an image)
+doc/
+docs/
+*.md
+!README.md
+
+# CI / tooling
+.github/
+Makefile
+.editorconfig
+cspell.json
+
+# Backups / scratch
+bup/
+wip/
+tmp/
+
+# Secrets / local config
+.env
+.env.*
+
+# Misc
+*.log
+*.tmp
+.DS_Store
+Thumbs.db

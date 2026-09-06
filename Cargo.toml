@@ -2,15 +2,17 @@
 name = "rnnoise-rs"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.74"
+rust-version = "1.85"
 license = "BSD-3-Clause"
 description = "Idiomatic Rust port of Xiph RNNoise (current conv+GRU model) for real-time speech noise suppression"
-repository = "https://github.com/lovelace-rs/rnnoise-rs"
+repository = "https://github.com/lovelace-labs/rnnoise-rs"
 readme = "README.md"
 keywords = ["rnnoise", "denoise", "noise", "audio", "dsp"]
 categories = ["multimedia::audio", "science"]
 exclude = ["bup", "scripts"]
-
+homepage = "https://github.com/lovelace-labs/rnnoise-rs"
+documentation = "https://docs.rs/rnnoise-rs"
+authors = ["lovelace-labs"]
 [lib]
 name = "rnnoise"
 crate-type = ["lib", "staticlib", "cdylib"]

@@ -1,0 +1,57 @@
+# =============================================================================
+# Git Submodules
+# =============================================================================
+#
+# External repositories included as subdirectories.
+# Documentation: https://git-scm.com/docs/gitmodules
+#
+# This file is portable - copy to other repos without modification.
+#
+# -----------------------------------------------------------------------------
+# Usage
+# -----------------------------------------------------------------------------
+#
+#   Clone with submodules:
+#     git clone --recurse-submodules <repo-url>
+#
+#   Initialize submodules after clone:
+#     git submodule update --init --recursive
+#
+#   Update all submodules to latest:
+#     git submodule update --remote --merge
+#
+#   Add a new submodule:
+#     git submodule add <repo-url> <path>
+#
+#   Remove a submodule:
+#     git submodule deinit <path>
+#     git rm <path>
+#     rm -rf .git/modules/<path>
+#
+# -----------------------------------------------------------------------------
+# Configuration Format
+# -----------------------------------------------------------------------------
+#
+#   [submodule "name"]
+#       path = relative/path/to/submodule
+#       url = https://github.com/owner/repo.git
+#       branch = main  # Optional: track specific branch
+#
+# =============================================================================
+
+
+# =============================================================================
+# Submodule Definitions
+# =============================================================================
+#
+# This project currently has no submodules.
+# Add submodule configurations below as needed.
+#
+# Example:
+#
+#   [submodule "vendor/library"]
+#       path = vendor/library
+#       url = https://github.com/owner/library.git
+#       branch = main
+#
+# =============================================================================

@@ -1,0 +1,33 @@
+{
+  "@context": "https://doi.org/10.5063/schema/codemeta-2.0",
+  "@type": "SoftwareSourceCode",
+  "name": "rnnoise-rs",
+  "description": "Idiomatic Rust port of Xiph RNNoise (current conv+GRU model) for real-time speech noise suppression.",
+  "version": "0.1.0",
+  "dateCreated": "2026-09-06",
+  "dateModified": "2026-09-06",
+  "license": "BSD-3-Clause",
+  "copyrightHolder": {
+    "@type": "Organization",
+    "name": "Lovelace Labs"
+  },
+  "codeRepository": "https://github.com/lovelace-labs/rnnoise-rs",
+  "issueTracker": "https://github.com/lovelace-labs/rnnoise-rs/issues",
+  "programmingLanguage": [
+    "Rust"
+  ],
+  "author": [
+    {
+      "@type": "Person",
+      "givenName": "Lars Bastiaan",
+      "familyName": "van Vianen",
+      "email": "lars@lovelacelabs.ai",
+      "affiliation": {
+        "@type": "Organization",
+        "name": "Lovelace Labs"
+      },
+      "@id": "https://orcid.org/0000-0002-8790-8630"
+    }
+  ],
+  "developmentStatus": "active"
+}
