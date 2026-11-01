@@ -1,49 +1,60 @@
 //! Parity against the pinned upstream Xiph C reference, the oracle this crate ports.
 //!
-//! Two things are checked, and both skip gracefully when the artifacts are absent
+//! Three things are checked, and all skip gracefully when the artifacts are absent
 //! (AGENTS.md rule 4), so this test never fails a run that lacks the data:
 //!
-//! 1. the port against the committed golden for every clip in `test_data/` — the
-//!    existing `tests/parity.rs` harness extended to the whole clip set;
+//! 1. the port against the committed golden for every clip in `test_data/`;
 //! 2. the committed golden against a *freshly built* scalar C oracle, which is what
 //!    makes the golden reproducible from upstream sources instead of an opaque blob:
 //!    `scripts/c_reference.sh` builds the `_c` path from the pinned commit and writes
-//!    one output per clip; the CI job points `RNNOISE_C_REFERENCE_DIR` at that
-//!    directory.
+//!    one output per clip; the CI job points `RNNOISE_C_REFERENCE_DIR` at that directory;
+//! 3. the committed golden against the historical golden it was replaced with, so the
+//!    difference between the two stays a single rounding.
 //!
-//! The tolerance is the one `doc/parity.md` defines: every difference must be a single
-//! rounding — `max_diff <= 2` LSB between the port and the reference, `<= 1` between two
-//! builds of the same path — and the relative energy stays below `1e-6`. The test asserts
-//! the spread, not equality, because a different compiler or `-O` level can round
-//! differently.
+//! Between the port and the golden the gate is **exactness**, not a spread: the goldens come
+//! from the pinned pure-C recipe, the port reproduces that path operation for operation, and
+//! it does so deterministically (its own `log10`, no FMA contraction), so a differing sample
+//! is a behaviour change that has to be justified against the reference — not a rounding to
+//! absorb. The 1-LSB allowance stays only where a *different compiler or libc* is compared
+//! with committed bytes: a fresh C build on another machine, and the golden the earlier clang
+//! build (FP contraction enabled) produced.
 //!
-//! With the recipe in `scripts/c_reference.sh` (the pure-C path, not the SSE2 `vec_avx.h`
-//! path) the measured values are 3 samples port-vs-golden and 4 samples golden-vs-fresh on
-//! the speech clip, and 0 on all three deterministic clips. Three orders of magnitude of
-//! headroom, so a real divergence cannot hide inside the gate.
+//! Measured with the recipe in `scripts/c_reference.sh`: 0 differing samples for the port on
+//! all four clips, 0 between the goldens and a fresh gcc build, and 4 samples (1 LSB) against
+//! the historical clang golden on the speech clip.
 
 use std::path::{Path, PathBuf};
 
 use rnnoise::{DenoiseState, FRAME_SIZE};
 
-const MAX_LSB_PORT: i32 = 2;
-const MAX_LSB_ORACLE: i32 = 1;
+const MAX_LSB_BUILD: i32 = 1;
 const MAX_REL: f64 = 1e-6;
 
-/// clip name → (clip path, committed golden path)
-fn clips() -> Vec<(&'static str, PathBuf, PathBuf)> {
+struct Clip {
+    name: &'static str,
+    input: PathBuf,
+    golden: PathBuf,
+    /// The golden this clip's golden replaced, kept for provenance: `ref_out.raw` came from a
+    /// clang build with FP contraction, which rounds differently.
+    historical: Option<PathBuf>,
+}
+
+fn clips() -> Vec<Clip> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_data");
-    let mut out = vec![(
-        "testing",
-        root.join("testing.raw"),
-        root.join("ref_out.raw"),
-    )];
+    let goldens = root.join("goldens");
+    let mut out = vec![Clip {
+        name: "testing",
+        input: root.join("testing.raw"),
+        golden: root.join("ref_out.raw"),
+        historical: Some(goldens.join("testing.c-clang.raw")),
+    }];
     for name in ["tone_noise", "silence", "zero"] {
-        out.push((
+        out.push(Clip {
             name,
-            root.join("clips").join(format!("{name}.raw")),
-            root.join("goldens").join(format!("{name}.raw")),
-        ));
+            input: root.join("clips").join(format!("{name}.raw")),
+            golden: goldens.join(format!("{name}.raw")),
+            historical: None,
+        });
     }
     out
 }
@@ -115,60 +126,80 @@ fn spread(reference: &[i16], other: &[i16]) -> Spread {
     }
 }
 
+fn report(kind: &str, name: &str, s: &Spread) {
+    eprintln!(
+        "{kind} {name:<10} samples={samples} differing={differing} max={max} rel={rel:.3e}",
+        samples = s.samples,
+        differing = s.differing,
+        max = s.max,
+        rel = s.rel,
+    );
+}
+
 #[test]
 fn port_matches_the_committed_goldens() {
     let oracle = std::env::var("RNNOISE_C_REFERENCE_DIR").ok();
     let mut ran = 0;
-    for (name, clip, golden) in clips() {
-        let Some(input) = load_i16(&clip) else {
-            eprintln!("parity: clip {name} absent, skipped");
+    for clip in clips() {
+        let Some(input) = load_i16(&clip.input) else {
+            eprintln!("parity: clip {} absent, skipped", clip.name);
             continue;
         };
-        let Some(golden_samples) = load_i16(&golden) else {
-            eprintln!("parity: golden for {name} absent, skipped");
+        let Some(golden_samples) = load_i16(&clip.golden) else {
+            eprintln!("parity: golden for {} absent, skipped", clip.name);
             continue;
         };
         let got = port_output(&input);
-        assert_eq!(got.len(), golden_samples.len(), "{name}: output length");
+        assert_eq!(
+            got.len(),
+            golden_samples.len(),
+            "{}: output length",
+            clip.name
+        );
         let s = spread(&golden_samples, &got);
-        eprintln!(
-            "port vs golden  {name:<10} samples={samples} differing={differing} max={max} rel={rel:.3e}",
-            samples = s.samples,
-            differing = s.differing,
-            max = s.max,
-            rel = s.rel,
-        );
-        assert!(
-            s.max <= MAX_LSB_PORT,
-            "{name}: max sample diff {max}",
-            max = s.max
-        );
-        assert!(
-            s.rel < MAX_REL,
-            "{name}: relative energy diff {rel:.3e}",
-            rel = s.rel
+        report("port vs golden     ", clip.name, &s);
+        assert_eq!(
+            s.differing, 0,
+            "{}: the port is no longer bit-exact against the pinned golden (max {} LSB)",
+            clip.name, s.max
         );
 
         if let Some(dir) = &oracle {
-            let fresh = load_i16(&Path::new(dir).join(format!("{name}.raw")));
-            let Some(fresh) = fresh else {
-                eprintln!("  oracle output for {name} absent, skipped");
+            let Some(fresh) = load_i16(&Path::new(dir).join(format!("{}.raw", clip.name))) else {
+                eprintln!("  oracle output for {} absent, skipped", clip.name);
                 continue;
             };
             let vs_fresh = spread(&golden_samples, &fresh);
-            eprintln!(
-                "  golden vs fresh C build {name:<10} differing={differing} max={max} rel={rel:.3e}",
-                differing = vs_fresh.differing,
-                max = vs_fresh.max,
-                rel = vs_fresh.rel,
-            );
+            report("  golden vs build  ", clip.name, &vs_fresh);
             assert!(
-                vs_fresh.max <= MAX_LSB_ORACLE,
-                "{name}: the committed golden is not reproducible by the pinned C reference"
+                vs_fresh.max <= MAX_LSB_BUILD,
+                "{}: the committed golden is not reproducible by the pinned C reference",
+                clip.name
             );
             assert!(
                 vs_fresh.rel < MAX_REL,
-                "{name}: golden/C-build spread too large"
+                "{}: golden/C-build spread too large",
+                clip.name
+            );
+        }
+
+        if let Some(path) = &clip.historical {
+            let Some(old) = load_i16(path) else {
+                eprintln!("  historical golden for {} absent, skipped", clip.name);
+                continue;
+            };
+            let vs_old = spread(&golden_samples, &old);
+            report("  golden vs clang  ", clip.name, &vs_old);
+            assert!(
+                vs_old.max <= MAX_LSB_BUILD,
+                "{}: the pinned-recipe golden and the historical clang golden differ by more \
+                 than one rounding (see doc/parity.md)",
+                clip.name
+            );
+            assert!(
+                vs_old.rel < MAX_REL,
+                "{}: golden/golden spread too large",
+                clip.name
             );
         }
         ran += 1;

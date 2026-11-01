@@ -741,7 +741,10 @@ impl DenoiseStateV1 {
         }
         self.features[NB_BANDS + 2 * NB_DELTA_CEPS] -= 1.3;
         self.features[NB_BANDS + 2 * NB_DELTA_CEPS + 1] -= 0.9;
-        self.features[NB_BANDS + 3 * NB_DELTA_CEPS] = 0.01 * (pitch_idx as f32 - 300.0);
+        // Same promotion as the current-model path: `.01` is a `double` in the C reference.
+        // Measured unchanged on `testing.raw` — this path quantizes the GRU input to int8 —
+        // but the rule is the same, so both pipelines mirror the reference.
+        self.features[NB_BANDS + 3 * NB_DELTA_CEPS] = (0.01f64 * (pitch_idx as f64 - 300.0)) as f32;
 
         let mut log_max = -2.0f32;
         let mut follow = -2.0f32;

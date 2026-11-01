@@ -85,12 +85,12 @@ jobs:
             tier: sse4.1
           - runner: ubuntu-latest
             tier: avx2
-          # Tier v4 runs here: the current ubuntu-latest hardware is Zen 4 (this run's
-          # coverage table shows `vnni` exercised, not skipped). If a runner ever lacks
-          # AVX512F+BW+VNNI this entry fails instead of skipping — that is the point,
-          # a requested tier that cannot run is uncovered coverage.
-          - runner: ubuntu-latest
-            tier: vnni
+          # Tier v4 is not requested from ubuntu-latest: the first run landed on a Zen 4
+          # runner and exercised vnni, the next landed on a runner without AVX-512 and failed
+          # the "a requested tier must run" assert. A hosted runner pool is not a promise about
+          # hardware, so v4 is requested only where the machine is chosen for it — the
+          # variable-gated job below (`vars.avx512_runner`). Requesting a tier the pool may or
+          # may not have would make CI fail for the wrong reason.
           - runner: ubuntu-24.04-arm
             tier: scalar
           - runner: ubuntu-24.04-arm

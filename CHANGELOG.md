@@ -64,6 +64,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `DenoiseState` and `DenoiseStateV1` resolve their shared tables at construction, so
   `process_frame` performs no lazy lookup, and the legacy path no longer clones an `Arc` per
   frame. No numerical change.
+- The pitch feature is computed in double, as the C reference computes it
+  (`.01*(pitch_index-300)` with a `double` literal). The port is now **bit-exact** against
+  the C reference on all four test clips (previously 3 samples differed by 1 LSB);
+  `tests/parity.rs` asserts equality. `test_data/ref_out.raw` and the goldens were
+  regenerated.
 
 ### Fixed
 

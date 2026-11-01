@@ -11,11 +11,13 @@ because the SIMD paths use different reductions and different `tanh`/`sigmoid`
 approximations. Two C builds of RNNoise already differ from each other by ~1 LSB
 on a few samples.
 
-So the target is: **match the scalar C reference (`_c` path) to within a tiny,
-fixed tolerance**, ideally to a handful of 1-LSB differences. The port replicates
-the scalar path operation-for-operation (the `vec.h` `tanh_approx`/`sigmoid_approx`,
-the `sgemv`/sparse GEMV accumulation order, and all the float↔double promotions),
-which is what gets it there.
+So the target is: **match the scalar C reference (`_c` path) as built by the pinned
+recipe**, which the port does bit for bit. The port replicates the scalar path
+operation-for-operation (the `vec.h` `tanh_approx`/`sigmoid_approx`, the
+`sgemv`/sparse GEMV accumulation order, and all the float↔double promotions), which
+is what gets it there. A 1-LSB allowance is kept only where a *different compiler or
+libc* is compared with committed bytes — two C builds already differ by ~1 LSB on a
+few samples — never between the port and the goldens.
 
 ## The oracle
 
@@ -52,62 +54,60 @@ zero), and compares to `ref_out.raw`:
 
 ```
 samples = 47520
-samples differing      = 3
-max difference         = 1 LSB
-sum(diff²)/sum(ref²)   = 2.0e-10
+samples differing      = 0
+max difference         = 0
+sum(diff²)/sum(ref²)   = 0
 ```
 
-The test asserts `rel < 1e-6` and `max_diff <= 2` — far tighter than
-`nnnoiseless`'s `1e-4` acceptance, and tighter than the spread between two C
-builds.
+The test asserts `rel < 1e-6` — far tighter than `nnnoiseless`'s `1e-4` acceptance — and,
+because the golden is the pinned recipe's output, **equality**. A differing sample is a
+behaviour change that has to be justified against the reference, not a rounding to absorb.
 
-### Where the 3 LSB come from
+### The residual that used to be here, and how it was closed
 
-Not FP contraction. A pure-C build at `-O0 -ffp-contract=off` differs by the same
-magnitude, and clang at `-O2` with contraction enabled produces the same output as gcc
-with it disabled. Instrumenting the feature vector on `testing.raw` (C vs port, frame by
-frame) shows **exactly one feature ever differs** — feature 64, `features[2*NB_BANDS]`:
+It was not FP contraction: a pure-C build at `-O0 -ffp-contract=off` differed by the same
+magnitude, and clang at `-O2` with contraction enabled produced the same output as gcc with
+it disabled. Instrumenting the feature vector on `testing.raw` (C vs port, frame by frame)
+showed **exactly one feature ever differing** — feature 64, `features[2*NB_BANDS]`:
 
 - C: `features[2*NB_BANDS] = .01*(pitch_index-300)` — `.01` is a `double`, so the product
   is computed in double and narrowed to float.
 - Port: `0.01f32 * (pitch_index as f32 - 300.0)` — computed in `f32`.
 
-Those last-bit differences propagate through the network and land on 3 output samples.
-Everything else — twiddles, `log10`, the DCT, band energy/corr, the pitch filter — is bit
-identical between the pinned oracle and the port, frame by frame. Computing that one op
-in double makes the port bit-exact against the pinned oracle on all four clips; it is a
-behaviour change, so it is a separate decision, not part of this CI work.
-
-On the three deterministic clips the port is already **bit-exact** against the pure-C
-oracle for every build tried (`gcc -O0`, `gcc -O2 -ffp-contract=off`, `clang -O2`).
+Those last-bit differences propagated through the network and landed on 3 output samples.
+Everything else — twiddles, `log10`, the DCT, band energy/corr, the pitch filter — was bit
+identical between the pinned oracle and the port, frame by frame. Computing that one op in
+double closed it: the port is bit-exact against the pinned oracle on every clip now, and the
+gate asserts that. The single op is worth the rule it enforces (C1: mirror the reference
+operation for operation), and `src/legacy.rs` applies the same promotion for the same reason
+— there the measured numbers do not move, because the legacy path quantizes its GRU input to
+int8 anyway.
 
 The clip set is `test_data/testing.raw` (speech) plus three deterministic clips
-from `scripts/make_clips.py`, whose goldens come from the pinned oracle build:
+from `scripts/make_clips.py`; every golden is now the pinned oracle build's output:
 
 | clip | what it exercises | port vs golden | fresh C build vs golden |
 |---|---|---|---|
-| `testing.raw` | real speech | 3 samples, 1 LSB, `2.0e-10` | 4 samples, 1 LSB, `2.7e-10` |
+| `testing.raw` | real speech | 0 — bit-exact | 0 |
 | `clips/tone_noise.raw` | stable pitch + noise floor | 0 — bit-exact | 0 |
 | `clips/silence.raw` | near-silence front-end | 0 — bit-exact | 0 |
 | `clips/zero.raw` | silence, network skipped | 0 — bit-exact | 0 |
 
-The deterministic clips are bit-exact against the oracle, so the gate there is not a
-tolerance but equality; the speech clip keeps the 1-LSB allowance because
-`ref_out.raw` came from a build with FP contraction (see below).
-
-Every difference is a single-LSB rounding, on both sides — which is exactly the
-claim: the port is operation-faithful, and the goldens are reproducible from the
-pinned upstream sources on a different machine/compiler than the one that made them.
+The gate is equality between the port and the goldens, and a 1-LSB spread between the
+goldens and a fresh build on another compiler. The golden the earlier clang build produced
+is kept as `test_data/goldens/testing.c-clang.raw` for provenance; against it the port shows
+4 samples, 1 LSB, `2.7e-10` — the difference is that build's FP contraction, not the port.
 
 The Rust float tiers never contract either, so the numbers above hold for every tier
-`simd::dispatch` can select. A forced-FMA build stays inside the bound (same 3 LSB and
-`2.003e-10` on `testing.raw`; at most 1 ULP per fused step, which can accumulate to ~1e-5
-absolute on a cancellation-heavy synthetic sum), but it is no longer bit-identical per step —
-which is why the ladder does not contain one. See
+`simd::dispatch` can select. A build with `-C target-feature=+fma` produced the same bytes as
+the non-contracting build on the machine used here, but that is luck per operation, not a
+property: a fused step is one rounding where the reference does two, and on a
+cancellation-heavy synthetic sum it can accumulate to ~1e-5 absolute. That is why the ladder
+does not contain an FMA tier. See
 [performance.md](performance.md#fma-and-sse41-on-x86-64-measured-and-not-shipped).
 
-The CLI demo reproduces this end-to-end:
-`./rnnoise-demo testing.raw out.raw` vs the C demo differ by the same 3 LSB.
+The CLI demo reproduces this end-to-end: `./rnnoise-demo testing.raw out.raw` is
+byte-identical to the C demo's output on the same clip.
 
 ## int8 quantized path
 
@@ -160,10 +160,11 @@ the downloaded model), but the recipe is:
 
 `make reference` (i.e. `scripts/c_reference.sh`) is that recipe, pinned to a commit
 and a model hash, writing per-clip outputs to `.c_reference/`. Goldens can be
-refreshed with `WRITE_GOLDENS=1 ./scripts/c_reference.sh`; the committed
-`test_data/ref_out.raw` was produced exactly this way (with clang, hence the 1-LSB
-spread against a gcc build). The `legacy_ref.raw` oracle was produced by running
-`nnnoiseless`'s library `process_frame` on the same input.
+refreshed with `WRITE_GOLDENS=1 ./scripts/c_reference.sh`, and every committed golden
+was produced exactly this way — which is what makes the equality assertion in
+`tests/parity.rs` a fact about the port rather than a tolerance. The
+`legacy_ref.raw` oracle was produced by running `nnnoiseless`'s library
+`process_frame` on the same input.
 
 ## Per-tier coverage in CI
 

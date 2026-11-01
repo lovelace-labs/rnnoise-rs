@@ -142,9 +142,10 @@ Cross-check, same machine, four alternating rounds against the baseline commit (
 not best of runs): float `305.2 → 205.2 µs`, front-end `31.4 → 21.7 µs` — see
 [Head-to-head](#head-to-head-against-the-pre-simd-baseline-74b46b1).
 
-Parity is unchanged by all of this (`3 / 47 520 samples, 1 LSB`, `2.003e-10`), which is
-the point of keeping the accumulation order: the tiers are a layout and width change, not
-an arithmetic change. Aarch64 keeps the portable reference for these loops, so its numbers
+Parity is unchanged by all of this (3 / 47 520 samples, 1 LSB, `2.003e-10` as measured then;
+0 now, see [parity.md](parity.md), because the `.01` pitch feature is computed in double like
+the reference), which is the point of keeping the accumulation order: the tiers are a layout
+and width change, not an arithmetic change. Aarch64 keeps the portable reference for these loops, so its numbers
 are unchanged.
 
 ### x86-64 int8 tiers (parity-safe, runtime-detected)
@@ -383,13 +384,14 @@ chain (`w[r]·x0 + w[8+r]·x1 + …` summed in one expression) to one product pe
 accumulated across the row group, which is the order upstream `vec.h` uses. So the tier is
 bit-identical to the current portable reference (`src/simd/tests.rs` asserts that for every
 tier the CPU reports), while the reference's own grouping changed against the baseline.
-The parity harness reports the same numbers on both builds
-(`samples=47520 nonzero_diff=3 max_diff=1 rel_energy=2.003e-10`), so nothing regressed.
+The parity harness reported the same numbers on both builds
+(`samples=47520 nonzero_diff=3 max_diff=1 rel_energy=2.003e-10` at the time, 0 now that the
+pitch feature is computed in double), so nothing regressed.
 
 ## Choosing a configuration
 
-- **Default (float):** highest quality, bit-exact with the C reference up to a handful of
-  1-LSB roundings, zero deps, ~32× real time on M4 Pro (~63× on the Zen 3 core) —
+- **Default (float):** highest quality, bit-exact with the C reference built by the pinned
+  recipe, zero deps, ~32× real time on M4 Pro (~63× on the Zen 3 core) —
   fine for real-time on one core with lots of headroom.
 - **int8 (`.quantized()`):** ~3× faster than float on aarch64, ~4.9× faster than the
   pre-SIMD x86 baseline (~2.0× faster than float on this Zen 3 core), ~4× smaller,

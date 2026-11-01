@@ -260,7 +260,11 @@ impl DenoiseState {
             exp[i] = (exp[i] as f64 / d.sqrt()) as f32;
         }
         c.dct(&mut features[NB_BANDS..], exp);
-        features[2 * NB_BANDS] = 0.01 * (pitch_index as f32 - 300.0);
+        // `.01` in the C reference is a `double` literal, so the product is computed in
+        // double and narrowed to float on assignment — like every other promotion in this
+        // file. This is the one feature where the port and the pinned oracle disagreed
+        // (feature 64), and the whole speech residual came from it: see doc/parity.md.
+        features[2 * NB_BANDS] = (0.01f64 * (pitch_index as f64 - 300.0)) as f32;
 
         let mut ly = [0.0f32; NB_BANDS];
         let mut log_max = -2.0f32;

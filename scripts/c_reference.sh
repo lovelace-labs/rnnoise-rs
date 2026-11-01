@@ -2,10 +2,11 @@
 # Build the upstream Xiph RNNoise C reference — the scalar (`_c`) compute path, the
 # same path this crate ports — and run it over the test clips.
 #
-# `test_data/ref_out.raw` and `test_data/goldens/*.raw` were produced by exactly this
-# build. CI re-runs it and compares against the committed goldens with the parity
-# tolerance (doc/parity.md), so a golden is reproducible from upstream sources instead
-# of being an opaque blob: a change in the C reference or in this port shows up here.
+# `test_data/ref_out.raw` and `test_data/goldens/*.raw` are the output of exactly this
+# build. CI re-runs it and compares against the committed goldens: the port must be
+# bit-exact with them, a fresh build on another compiler is allowed 1 LSB (doc/parity.md).
+# So a golden is reproducible from upstream sources instead of being an opaque blob: a
+# change in the C reference or in this port shows up here.
 #
 # Usage: scripts/c_reference.sh [output-dir]
 #   output-dir  where the per-clip outputs are written (default: .c_reference)
@@ -96,15 +97,18 @@ for clip in "${clips[@]}"; do
 done
 
 if [ "${WRITE_GOLDENS:-0}" = "1" ]; then
-  # Only the clips under test_data/clips/ get goldens here; test_data/testing.raw keeps
-  # its committed golden test_data/ref_out.raw (produced by the same pure-C path, but by
-  # a build with FP contraction, so a fresh build differs from it by a handful of 1-LSB
-  # samples — see doc/parity.md).
+  # Refreshing a golden is only correct after a behaviour change that has been justified
+  # against the reference, because the gate asserts bit-exactness against these bytes.
+  # The golden the earlier clang build produced is kept as
+  # test_data/goldens/testing.c-clang.raw for provenance.
   mkdir -p "$REPO/test_data/goldens"
   for clip in "${clips[@]}"; do
     name="$(basename "$clip" .raw)"
-    [ "$(dirname "$clip")" = "$REPO/test_data/clips" ] || continue
-    cp "$OUT/$name.raw" "$REPO/test_data/goldens/$name.raw"
+    if [ "$(dirname "$clip")" = "$REPO/test_data/clips" ]; then
+      cp "$OUT/$name.raw" "$REPO/test_data/goldens/$name.raw"
+    else
+      cp "$OUT/$name.raw" "$REPO/test_data/ref_out.raw"
+    fi
   done
-  echo "c_reference: goldens refreshed in test_data/goldens/ (pure-C path)"
+  echo "c_reference: goldens refreshed in test_data/ (pure-C path)"
 fi

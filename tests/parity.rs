@@ -58,10 +58,15 @@ fn matches_c_reference() {
         rel
     );
 
-    // Far tighter than nnnoiseless's 1e-4 acceptance; differences are limited to
-    // a handful of 1-LSB roundings vs the C build (see TODO.md parity notes).
+    // Far tighter than nnnoiseless's 1e-4 acceptance. `test_data/ref_out.raw` is produced by
+    // the pinned pure-C recipe in `scripts/c_reference.sh`, and the port reproduces it byte
+    // for byte, so the gate is equality: a differing sample here is a DSP change that has to
+    // be justified against the reference, not a rounding to be tolerated.
     assert!(rel < 1e-6, "relative energy diff too large: {rel:.3e}");
-    assert!(max_diff <= 2, "max sample diff too large: {max_diff}");
+    assert_eq!(
+        nonzero, 0,
+        "port differs from the pinned golden: {nonzero} samples, max {max_diff}"
+    );
 }
 
 #[test]
