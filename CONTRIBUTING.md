@@ -20,7 +20,7 @@ workflow used across all `lovelace-labs/*-rs` repos.
 
 ### Prerequisites
 
-- Rust 1.85+ (edition 2021), installed via [rustup](https://rustup.rs/).
+- Rust 1.89+ (edition 2021), installed via [rustup](https://rustup.rs/).
   The pinned toolchain plus `rustfmt` and `clippy` are declared in
   [`rust-toolchain.toml`](rust-toolchain.toml) and installed automatically.
 

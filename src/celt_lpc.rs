@@ -9,7 +9,12 @@
 pub(crate) fn inner_prod(x: &[f32], y: &[f32], n: usize) -> f32 {
     let (mut s0, mut s1, mut s2, mut s3) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
     let n4 = n - n % 4;
-    for (xc, yc) in x[..n4].chunks_exact(4).zip(y[..n4].chunks_exact(4)) {
+    for (xc, yc) in x[..n4]
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(y[..n4].as_chunks::<4>().0.iter())
+    {
         s0 += xc[0] * yc[0];
         s1 += xc[1] * yc[1];
         s2 += xc[2] * yc[2];
@@ -48,56 +53,11 @@ pub(crate) fn dual_inner_prod(x: &[f32], y01: &[f32], y02: &[f32], n: usize) -> 
 
 /// `rnn_pitch_xcorr`: `xcorr[i] = sum_{j<len} x[j] * y[i+j]` for `i in 0..max_pitch`.
 ///
-/// Computes four lags at once, advancing through `x` while keeping a small window
-/// of `y` in registers — this reuses each `x` load four times and lets the inner
-/// loop vectorize, which matters because this is the hottest kernel of the pitch
-/// search. Each `xcorr[i]` still accumulates in `j` order.
+/// Delegates to the runtime-detected kernel in [`crate::simd`]. Every tier keeps one
+/// accumulator per lag and sums in `j` order, so the result is bit-identical to the
+/// portable reference there.
 pub(crate) fn pitch_xcorr(x: &[f32], y: &[f32], xcorr: &mut [f32], len: usize, max_pitch: usize) {
-    let x = &x[..len];
-    let len4 = len - len % 4;
-    let mp4 = max_pitch - max_pitch % 4;
-    let mut i = 0;
-    while i < mp4 {
-        let (mut c0, mut c1, mut c2, mut c3) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
-        let (mut y0, mut y1, mut y2, mut y3) = (y[i], y[i + 1], y[i + 2], y[i + 3]);
-        for (xc, yc) in x[..len4].chunks_exact(4).zip(y[i + 4..].chunks_exact(4)) {
-            c0 += xc[0] * y0;
-            c1 += xc[0] * y1;
-            c2 += xc[0] * y2;
-            c3 += xc[0] * y3;
-            y0 = yc[0];
-            c0 += xc[1] * y1;
-            c1 += xc[1] * y2;
-            c2 += xc[1] * y3;
-            c3 += xc[1] * y0;
-            y1 = yc[1];
-            c0 += xc[2] * y2;
-            c1 += xc[2] * y3;
-            c2 += xc[2] * y0;
-            c3 += xc[2] * y1;
-            y2 = yc[2];
-            c0 += xc[3] * y3;
-            c1 += xc[3] * y0;
-            c2 += xc[3] * y1;
-            c3 += xc[3] * y2;
-            y3 = yc[3];
-        }
-        for j in len4..len {
-            c0 += x[j] * y[i + j];
-            c1 += x[j] * y[i + 1 + j];
-            c2 += x[j] * y[i + 2 + j];
-            c3 += x[j] * y[i + 3 + j];
-        }
-        xcorr[i] = c0;
-        xcorr[i + 1] = c1;
-        xcorr[i + 2] = c2;
-        xcorr[i + 3] = c3;
-        i += 4;
-    }
-    while i < max_pitch {
-        xcorr[i] = inner_prod(x, &y[i..], len);
-        i += 1;
-    }
+    crate::simd::xcorr(xcorr, x, y, len, max_pitch);
 }
 
 /// `rnn_lpc`: Levinson–Durbin recursion. `ac` has length `p+1`.

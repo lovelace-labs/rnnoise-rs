@@ -22,7 +22,8 @@ architecture: a 32-band DSP front-end feeding a **2×Conv1D + 3×GRU**,
   methodology and a vs-`nnnoiseless` comparison are in [BENCHMARKS.md](BENCHMARKS.md).
 - **Self-contained:** the default model is embedded; no network or build step.
 - **No dependencies** in the core library. Pure safe Rust (the only `unsafe` is
-  in the optional C ABI and the optional NEON `sdot` kernel).
+  in the optional C ABI and the runtime-detected SIMD dot kernels: NEON `sdot`
+  on aarch64, `pmovsxbw`/`pmaddwd` on x86-64).
 - Optional **C ABI** (`capi` feature) compatible with `rnnoise.h`.
 
 ## Documentation
@@ -89,7 +90,7 @@ delivers is the much higher **quality** of the modern model, implemented faster
 than the official C library, and still comfortably real-time (32× on one core).
 See [BENCHMARKS.md](BENCHMARKS.md) for the full comparison and a speed-up study.
 
-### Faster + smaller (int8 + `sdot`)
+### Faster + smaller (int8 + SIMD dot products)
 
 `RnnModel::quantized()` returns an int8 version of the model: **~3× faster**
 (105 µs/frame, ~95× real time — via ARM `sdot` 4-MAC int8 dot products) and **~4×
@@ -104,9 +105,13 @@ let model = Arc::new(RnnModel::default().quantized());
 let mut st = DenoiseState::with_model(model);
 ```
 
-On aarch64 with the `dotprod` CPU feature this uses an inline-asm `sdot` kernel;
-elsewhere it falls back to a portable scalar dot product (identical results, see
-[BENCHMARKS.md](BENCHMARKS.md)).
+The dot kernel is picked at **runtime**, per CPU, not by build flags: `sdot` on
+aarch64 with `dotprod`, and on x86-64 a tier ladder (SSE2 → SSE4.1 → AVX2 →
+AVX-512 VNNI) chosen from CPUID. Every tier computes the *same* exact `i32` value,
+so output never depends on which one ran. No `-C target-cpu` is needed. The crate's
+`rust-version` is 1.89 (the AVX-512 tier needs the intrinsics and `avx512f` target
+feature that became stable there). See [BENCHMARKS.md](BENCHMARKS.md) and
+[doc/performance.md](doc/performance.md).
 
 ### Legacy (original 2018) model
 

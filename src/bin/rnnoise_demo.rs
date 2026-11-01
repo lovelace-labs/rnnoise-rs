@@ -47,7 +47,7 @@ fn run(in_path: &str, out_path: &str) -> io::Result<()> {
             n if n < bytes.len() => break, // upstream stops at the first short/empty read
             _ => {}
         }
-        for (i, c) in bytes.chunks_exact(2).enumerate() {
+        for (i, c) in bytes.as_chunks::<2>().0.iter().enumerate() {
             in_buf[i] = i16::from_ne_bytes([c[0], c[1]]) as f32;
         }
         st.process_frame(&mut out_buf, &in_buf);

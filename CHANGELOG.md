@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking changes
+
+- The minimum supported Rust version is now **1.89** (was 1.85): the AVX-512 VNNI tier uses
+  AVX-512 intrinsics and the `avx512f` target feature, which are stable from 1.89. AVX-512 is
+  still only *used* when CPUID reports it.
+
 ### Added
 
 - Repository scaffolding aligned with the sibling `lovelace-labs/*-rs` repos:
@@ -14,6 +20,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `.dockerignore`, `cspell.json`, `codemeta.json`, `CITATION.cff`,
   `LICENSE`, `SECURITY.md`, `CONTRIBUTING.md`, and `AGENTS.md`.
 - `.github/workflows/ci.yml` aligned with the org-wide CI template.
+- Runtime-dispatched x86-64 SIMD tiers, chosen from CPUID with no `-C target-cpu` needed:
+  int8 dot products (SSE2, SSE4.1, AVX2, AVX-512 VNNI), the float GEMVs (including a
+  register-resident accumulator for the sparse 8x4 GEMV and a block-major dense layout),
+  the pitch cross-correlation and the FFT butterflies. Every tier keeps the reference
+  accumulation order and is asserted bit-identical to the portable scalar code
+  (`src/simd/tests.rs`, `src/fft/tests.rs`). On an AMD Zen 3 core the int8 network drops
+  from ≈487 µs to ≈84 µs per frame and the float full frame from ≈271 µs to ≈210 µs.
+- A sparse weight index that is complete and ascending (the shipped GRU matrices) is loaded
+  in dense form at parse time; the accumulation order, and therefore the output, is
+  unchanged.
 
 ## [0.1.0]
 

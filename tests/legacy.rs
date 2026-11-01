@@ -7,7 +7,9 @@ use rnnoise::{DenoiseStateV1, FRAME_SIZE};
 
 fn load_i16(bytes: &[u8]) -> Vec<i16> {
     bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| i16::from_le_bytes([c[0], c[1]]))
         .collect()
 }
@@ -21,7 +23,7 @@ fn legacy_matches_old_model() {
     let mut out_buf = [0.0f32; FRAME_SIZE];
     let mut output: Vec<f32> = Vec::new();
     let mut first = true;
-    for chunk in input.chunks_exact(FRAME_SIZE) {
+    for chunk in input.as_chunks::<FRAME_SIZE>().0.iter() {
         let frame: Vec<f32> = chunk.iter().map(|&s| s as f32).collect();
         st.process_frame(&mut out_buf, &frame);
         if !first {

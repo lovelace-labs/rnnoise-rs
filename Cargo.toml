@@ -2,7 +2,7 @@
 name = "rnnoise-rs"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.89"
 license = "BSD-3-Clause"
 description = "Idiomatic Rust port of Xiph RNNoise (current conv+GRU model) for real-time speech noise suppression"
 repository = "https://github.com/lovelace-labs/rnnoise-rs"

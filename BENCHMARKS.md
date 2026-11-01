@@ -75,6 +75,13 @@ by 1 LSB vs the C build).
 port and pitch search aren't as tight as upstream's. It's only ~11 % of the
 frame, so it barely moves the total, but it's the clearest remaining target.
 
+That target is now closed on x86-64: with bit-exact SIMD butterflies, the
+cross-correlation tiers and the precomputed band weights, the front-end is
+**21.8 µs** of a **208–216 µs** frame on the AMD Zen 3 core (full frame was
+270.6 µs; int8 116.8 → 102–107 µs). See [doc/performance.md](doc/performance.md)
+for the tier table. These tiers keep the reference accumulation order, so the
+parity numbers above are unchanged.
+
 **nnnoiseless is faster because its model is smaller, not because the code is
 faster.** Its NN is 9.8 µs (old ~215 K-param model, int8, fits in cache) vs our
 277 µs (new ~2.9 M-param model, 11.5 MB of weights). Per byte of weights,
@@ -141,11 +148,20 @@ opt-in; the float model stays the default. (A naive dequant-to-f32 int8 loop, by
 contrast, measured *0.81×* — slower — confirming the win is the instruction-count
 reduction, not bandwidth.)
 
-### 2. x86 VNNI / `vpdpbusd` — *port the int8 path off ARM (future)*
+### 2. x86 int8 SIMD — ✅ *implemented (AVX2), VNNI pending*
 
-The same int8 design maps to AVX-512-VNNI / AVX-VNNI (`vpdpbusd`) on x86 for an
-equivalent win; only the per-output dot kernel needs an x86 path (the scalar
-fallback already works everywhere).
+`src/simd/` dispatches per architecture. On x86-64 the kernel is
+`pmovsxbw` + `pmaddwd` (runtime AVX2 detection); before that the int8 path had no
+SIMD at all on the SSE2 baseline (`pmaddubsw` is SSSE3) and was **slower than
+float** — 487 vs 289 µs of NN per frame on an AMD Zen 3 core. With the kernel:
+int8 net 487 → **88 µs** (5.6×), full frame 519 → **120 µs** (84× real time),
+legacy 40.2 → 37.8 µs. Still exact int32, so output is unchanged.
+
+`vpdpbusd` (AVX-VNNI / AVX-512-VNNI, 64 MACs per instruction on Zen 4+ / Ice
+Lake+) is the remaining step: it is unsigned × signed, so it needs a biased weight
+domain plus a `128 · Σ q_x` correction (and the 512-bit `core::arch` types postdate
+the crate's `rust-version`). Estimated another 2–4× on such CPUs; not measurable on
+the Zen 3 box used here.
 
 ### 3. f16 weights + f16 SIMD — *medium win (future)*
 

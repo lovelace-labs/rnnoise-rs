@@ -35,6 +35,7 @@ mod denoise;
 mod fft;
 mod nnet;
 mod pitch;
+mod simd;
 mod weights;
 
 #[cfg(feature = "capi")]

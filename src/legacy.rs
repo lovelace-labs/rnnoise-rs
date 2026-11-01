@@ -334,7 +334,7 @@ impl GruLayer {
         let inv = quantize_dyn(&input[..ni], &mut qx[..ni]);
         let mut in_c = [0.0f32; 3 * MAX_NEURONS];
         for o in 0..3 * n {
-            in_c[o] = crate::nnet::i8_dot(&self.input_weights_t[o * ni..o * ni + ni], &qx[..ni])
+            in_c[o] = crate::simd::i8_dot(&self.input_weights_t[o * ni..o * ni + ni], &qx[..ni])
                 as f32
                 * inv;
         }

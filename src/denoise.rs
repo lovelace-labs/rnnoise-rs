@@ -5,7 +5,7 @@
 
 use std::sync::{Arc, OnceLock};
 
-use crate::common::{biquad, compute_band_corr, compute_band_energy, interp_band_gain, Common};
+use crate::common::{biquad, Common};
 use crate::fft::Cpx;
 use crate::nnet::{compute_rnn, RnnState};
 use crate::pitch::{pitch_downsample, pitch_search, remove_doubling};
@@ -81,6 +81,7 @@ impl DenoiseState {
     pub fn process_frame(&mut self, output: &mut [f32], input: &[f32]) -> f32 {
         assert!(input.len() >= FRAME_SIZE && output.len() >= FRAME_SIZE);
 
+        let c = common();
         let mut x = [0.0f32; FRAME_SIZE];
         // DC-removal high-pass.
         const A_HP: [f32; 2] = [-1.99599, 0.99600];
@@ -124,6 +125,7 @@ impl DenoiseState {
                 &features,
             );
             pitch_filter(
+                c,
                 &mut self.delayed_x,
                 &self.delayed_p,
                 &self.delayed_ex,
@@ -138,14 +140,14 @@ impl DenoiseState {
                 let t = g[i] as f64 * (self.delayed_ex[i] as f64 + 1e-3) / (ex[i] as f64 + 1e-3);
                 self.lastg[i] = t.min(1.0) as f32;
             }
-            interp_band_gain(&mut gf, &g);
+            c.interp_band_gain(&mut gf, &g);
             for i in 0..FREQ_SIZE {
                 self.delayed_x[i].r *= gf[i];
                 self.delayed_x[i].i *= gf[i];
             }
         }
 
-        frame_synthesis(common(), output, &mut self.synthesis_mem, &self.delayed_x);
+        frame_synthesis(c, output, &mut self.synthesis_mem, &self.delayed_x);
 
         self.delayed_x.copy_from_slice(&xfreq);
         self.delayed_p.copy_from_slice(&p);
@@ -165,7 +167,7 @@ impl DenoiseState {
         self.analysis_mem.copy_from_slice(&input[..FRAME_SIZE]);
         c.apply_window(&mut x);
         c.forward_transform(xfreq, &x);
-        compute_band_energy(ex, xfreq);
+        c.compute_band_energy(ex, xfreq);
     }
 
     /// `rnn_compute_frame_features`: returns `true` if the frame is silence.
@@ -214,8 +216,8 @@ impl DenoiseState {
         pbuf.copy_from_slice(&self.pitch_buf[base..base + WINDOW_SIZE]);
         c.apply_window(&mut pbuf);
         c.forward_transform(p, &pbuf);
-        compute_band_energy(ep, p);
-        compute_band_corr(exp, xfreq, p);
+        c.compute_band_energy(ep, p);
+        c.compute_band_corr(exp, xfreq, p);
         for i in 0..NB_BANDS {
             let d = 0.001f64 + (ex[i] * ep[i]) as f64;
             exp[i] = (exp[i] as f64 / d.sqrt()) as f32;
@@ -269,7 +271,15 @@ fn frame_synthesis(c: &Common, out: &mut [f32], synthesis_mem: &mut [f32], y: &[
 
 /// `rnn_pitch_filter`: comb-filter the spectrum towards the pitch-predicted
 /// spectrum `p`, then renormalise band energy.
-fn pitch_filter(xfreq: &mut [Cpx], p: &[Cpx], ex: &[f32], ep: &[f32], exp: &[f32], g: &[f32]) {
+fn pitch_filter(
+    c: &Common,
+    xfreq: &mut [Cpx],
+    p: &[Cpx],
+    ex: &[f32],
+    ep: &[f32],
+    exp: &[f32],
+    g: &[f32],
+) {
     let mut r = [0.0f32; NB_BANDS];
     for i in 0..NB_BANDS {
         let mut ri = if exp[i] > g[i] {
@@ -286,19 +296,19 @@ fn pitch_filter(xfreq: &mut [Cpx], p: &[Cpx], ex: &[f32], ep: &[f32], exp: &[f32
         r[i] = ri;
     }
     let mut rf = [0.0f32; FREQ_SIZE];
-    interp_band_gain(&mut rf, &r);
+    c.interp_band_gain(&mut rf, &r);
     for i in 0..FREQ_SIZE {
         xfreq[i].r += rf[i] * p[i].r;
         xfreq[i].i += rf[i] * p[i].i;
     }
     let mut new_e = [0.0f32; NB_BANDS];
-    compute_band_energy(&mut new_e, xfreq);
+    c.compute_band_energy(&mut new_e, xfreq);
     let mut norm = [0.0f32; NB_BANDS];
     for i in 0..NB_BANDS {
         norm[i] = (ex[i] as f64 / (1e-8 + new_e[i] as f64)).sqrt() as f32;
     }
     let mut normf = [0.0f32; FREQ_SIZE];
-    interp_band_gain(&mut normf, &norm);
+    c.interp_band_gain(&mut normf, &norm);
     for i in 0..FREQ_SIZE {
         xfreq[i].r *= normf[i];
         xfreq[i].i *= normf[i];

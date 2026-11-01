@@ -111,14 +111,33 @@ float routines:
     so it is **bit-identical** to the C `sgemv` and to a strided version.
   - *Sparse float 8×4* (`sparse_sgemv8x4`) — the GRU matrices; bounds-check-free
     8-wide row updates over the indexed blocks.
-  - *int8* (`dense_q8`) — quantize activations, then per-output `sdot` (or scalar)
-    int32 dot, scaled. See [models.md](models.md#int8-quantized-model).
+  - *int8* — quantize activations, then per-output int32 dot via `crate::simd`
+    (architecture-specific, runtime-detected), scaled by the per-output factor.
+    See [models.md](models.md#int8-quantized-model).
   - A `diag` term is added for GRU recurrent matrices (`3M == N`).
-- **`sdot`** is a single `sdot v.4s, a.16b, b.16b` via stable inline `asm!`
-  (the `vdotq_s32` intrinsic is nightly-only). `dense_q8_neon` loops it over
-  16-element chunks; `dense_q8_scalar` is the portable fallback with the identical
-  integer result (unit-tested by `sdot_matches_scalar`). `i8_dot` (gated to
-  `legacy-model`) is the single-vector version the legacy GRUs use.
+- **`simd`** ([`src/simd/`](../src/simd/mod.rs)) holds the int8 dot kernels. Roots
+  (`mod.rs`) only declare submodules and re-export; the choice of kernel is a
+  **runtime** decision made from cached CPUID flags, not from `-C target-cpu`:
+  `dispatch` routes to `x86_64::select` or `aarch64::select`, each walking its tier
+  ladder top-down and falling back to the portable `scalar` reference.
+  - x86-64 tiers: `sse2` (v1, `punpcklbw` + `cmpgt` sign mask + `pmaddwd` — SSE2
+    has no byte-widen instruction), `sse41` (v2, `pmovsxbw` + `pmaddwd`), `avx2`
+    (v3, same shape 16 lanes wide), `vnni` (v4, `vpdpbusd` — unsigned × signed, so
+    it biases weights by +128 in register and subtracts `128 · Σ q_x` per output;
+    optional feature, needs Rust ≥ 1.89).
+  - `sparse8x4` (AVX2): the 8 rows of a block accumulate in one ymm register for
+    the whole row group instead of being reloaded/stored per block. Accumulated per
+    column, which is the order upstream `vec.h` uses, so it is bit-identical to the
+    portable reference (`tests::avx2_sparse8x4_matches_scalar`).
+  - aarch64: `dotprod` (`sdot` via stable inline `asm!`, since `vdotq_s32` is
+    nightly-only).
+  - Because every product and pair sum fits in `i32` for the model's widths, all
+    tiers give the **same** integer result; `src/simd/tests.rs` asserts tier ==
+    scalar per detected tier, exercises the non-multiple-of-vector tail loops, and
+    checks the VNNI bias identity in pure Rust so it is validated even on runners
+    without AVX-512. `i8_dot` (gated to `legacy-model`) is the single-row form the
+    legacy GRUs use.
+
 - **`compute_conv1d`** shifts `mem` + `input` through the kernel window (the
   layer's `nb_inputs` is `3 × in_size`; `mem` holds the previous 2 frames), then
   the linear layer + activation, and updates `mem`.

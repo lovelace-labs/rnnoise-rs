@@ -88,11 +88,25 @@ nnnoiseless 0.32 s (smaller/older model). The NN is 89 % of each frame and is
 
 ## Future enhancements (not required for parity)
 
-- [ ] **x86 int8 SIMD** (AVX-VNNI `vpdpbusd`): port the int8 dot kernel off ARM
-      (scalar fallback already works everywhere); same ~3–4× win as `sdot`.
+- [x] **x86-64 int8 SIMD** (`pmovsxbw` + `pmaddwd`, runtime AVX2 detection) in
+      `src/simd/`: on an AMD Zen 3 core the int8 neural net went 487 → 88 µs/frame
+      (5.6×; full frame 519 → 120 µs) — previously x86 had no int8 dot kernel and
+      int8 was *slower* than float. Exact int32, so results match the scalar path
+      bit for bit.
+- [x] **AVX2 float GEMV tier** (`simd/x86_64/dense.rs`) plus loading *complete ascending*
+      sparse indices in dense row-major form (`weights.rs`) — the shipped model's GRU
+      matrices qualify, so they run through the wider tier with provably identical
+      accumulation order. Float NN 239 → 192 µs/frame on Zen 3.
+- [ ] **AVX-VNNI / AVX-512-VNNI (`vpdpbusd`)** for Zen 4+ / Ice Lake+: unsigned ×
+      signed, so it needs a biased weight domain plus a `128 · Σ q_x` correction;
+      estimated another 2–4× on the int8 net, not measurable on the Zen 3 box.
 - [ ] **f16 weights + f16 SIMD** (~1.5–2× on ARM); less accuracy loss than int8.
 - [ ] Multi-thread the per-layer GEMVs across cores (best for offline/batch).
-- [ ] Tighten the front-end (real-input FFT) to close the ~10 µs gap to C.
+- [x] Tighten the x86-64 front-end: bit-exact SIMD butterflies (`fft/x86_64.rs`),
+      bit-exact cross-correlation tiers (`simd/x86_64/xcorr.rs`) and a precomputed band
+      weight table. Front-end 31.6 → 21.8 µs/frame on Zen 3. A *real-input* FFT would
+      halve the transform again but changes rounding, so it is left as a separate,
+      explicitly opt-in lever.
 - [ ] Ship a pre-quantized int8 / "little" model blob behind a feature so the
       crate fits the crates.io 10 MB limit (default float blob is 11.3 MB).
 - [ ] `cargo-c` packaging / pkg-config for the C ABI; optional WAV I/O in the CLI.

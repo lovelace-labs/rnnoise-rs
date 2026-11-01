@@ -12,6 +12,10 @@ pub(crate) struct Common {
     half_window: [f32; FRAME_SIZE],
     /// `NB_BANDS x NB_BANDS` DCT matrix (row-major, as in `rnn_dct_table`).
     dct_table: [f32; NB_BANDS * NB_BANDS],
+    /// Triangular band weight `j / band_size` per FFT bin. Precomputed with the same
+    /// f32 division the runtime used to do, so the band functions produce identical
+    /// bits while dropping ~317 float divisions per call.
+    band_frac: [f32; FREQ_SIZE],
     fft: KissFft,
 }
 
@@ -41,9 +45,18 @@ impl Common {
             }
         }
 
+        let mut band_frac = [0.0f32; FREQ_SIZE];
+        for i in 0..NB_BANDS + 1 {
+            let band_size = EBAND20MS[i + 1] - EBAND20MS[i];
+            for j in 0..band_size {
+                band_frac[EBAND20MS[i] + j] = j as f32 / band_size as f32;
+            }
+        }
+
         Common {
             half_window,
             dct_table,
+            band_frac,
             fft: KissFft::new(WINDOW_SIZE),
         }
     }
@@ -95,64 +108,64 @@ impl Common {
             out[i] = WINDOW_SIZE as f32 * y[WINDOW_SIZE - i].r;
         }
     }
-}
 
-/// `compute_band_energy`: aggregate `|X|^2` into `NB_BANDS` triangular bands.
-pub(crate) fn compute_band_energy(band_e: &mut [f32], x: &[Cpx]) {
-    let mut sum = [0.0f32; NB_BANDS + 2];
-    for i in 0..NB_BANDS + 1 {
-        let band_size = EBAND20MS[i + 1] - EBAND20MS[i];
-        for j in 0..band_size {
-            let frac = j as f32 / band_size as f32;
-            let xx = x[EBAND20MS[i] + j];
-            let tmp = xx.r * xx.r + xx.i * xx.i;
-            sum[i] += (1.0 - frac) * tmp;
-            sum[i + 1] += frac * tmp;
+    /// `compute_band_energy`: aggregate `|X|^2` into `NB_BANDS` triangular bands.
+    pub(crate) fn compute_band_energy(&self, band_e: &mut [f32], x: &[Cpx]) {
+        let mut sum = [0.0f32; NB_BANDS + 2];
+        for i in 0..NB_BANDS + 1 {
+            let band_size = EBAND20MS[i + 1] - EBAND20MS[i];
+            for j in 0..band_size {
+                let frac = self.band_frac[EBAND20MS[i] + j];
+                let xx = x[EBAND20MS[i] + j];
+                let tmp = xx.r * xx.r + xx.i * xx.i;
+                sum[i] += (1.0 - frac) * tmp;
+                sum[i + 1] += frac * tmp;
+            }
         }
+        sum[1] = (sum[0] + sum[1]) * 2.0 / 3.0;
+        sum[NB_BANDS] = (sum[NB_BANDS] + sum[NB_BANDS + 1]) * 2.0 / 3.0;
+        band_e[..NB_BANDS].copy_from_slice(&sum[1..=NB_BANDS]);
     }
-    sum[1] = (sum[0] + sum[1]) * 2.0 / 3.0;
-    sum[NB_BANDS] = (sum[NB_BANDS] + sum[NB_BANDS + 1]) * 2.0 / 3.0;
-    band_e[..NB_BANDS].copy_from_slice(&sum[1..=NB_BANDS]);
-}
 
-/// `compute_band_corr`: aggregate `Re(X conj-correlated with P)` into bands.
-pub(crate) fn compute_band_corr(band_e: &mut [f32], x: &[Cpx], p: &[Cpx]) {
-    let mut sum = [0.0f32; NB_BANDS + 2];
-    for i in 0..NB_BANDS + 1 {
-        let band_size = EBAND20MS[i + 1] - EBAND20MS[i];
-        for j in 0..band_size {
-            let frac = j as f32 / band_size as f32;
-            let idx = EBAND20MS[i] + j;
-            let tmp = x[idx].r * p[idx].r + x[idx].i * p[idx].i;
-            sum[i] += (1.0 - frac) * tmp;
-            sum[i + 1] += frac * tmp;
+    /// `compute_band_corr`: aggregate `Re(X conj-correlated with P)` into bands.
+    pub(crate) fn compute_band_corr(&self, band_e: &mut [f32], x: &[Cpx], p: &[Cpx]) {
+        let mut sum = [0.0f32; NB_BANDS + 2];
+        for i in 0..NB_BANDS + 1 {
+            let band_size = EBAND20MS[i + 1] - EBAND20MS[i];
+            for j in 0..band_size {
+                let frac = self.band_frac[EBAND20MS[i] + j];
+                let idx = EBAND20MS[i] + j;
+                let tmp = x[idx].r * p[idx].r + x[idx].i * p[idx].i;
+                sum[i] += (1.0 - frac) * tmp;
+                sum[i + 1] += frac * tmp;
+            }
         }
+        sum[1] = (sum[0] + sum[1]) * 2.0 / 3.0;
+        sum[NB_BANDS] = (sum[NB_BANDS] + sum[NB_BANDS + 1]) * 2.0 / 3.0;
+        band_e[..NB_BANDS].copy_from_slice(&sum[1..=NB_BANDS]);
     }
-    sum[1] = (sum[0] + sum[1]) * 2.0 / 3.0;
-    sum[NB_BANDS] = (sum[NB_BANDS] + sum[NB_BANDS + 1]) * 2.0 / 3.0;
-    band_e[..NB_BANDS].copy_from_slice(&sum[1..=NB_BANDS]);
-}
 
-/// `interp_band_gain`: expand per-band gains to per-bin gains by linear
-/// interpolation. Writes bins `0..EBAND20MS[NB_BANDS+1]` (=400) and zeroes the
-/// rest of `g` — matching the upstream behaviour where callers pre-zero the
-/// buffer and bins above 20 kHz stay silent.
-pub(crate) fn interp_band_gain(g: &mut [f32], band_e: &[f32]) {
-    for v in g[..FREQ_SIZE].iter_mut() {
-        *v = 0.0;
-    }
-    for i in 1..NB_BANDS {
-        let band_size = EBAND20MS[i + 1] - EBAND20MS[i];
-        for j in 0..band_size {
-            let frac = j as f32 / band_size as f32;
-            g[EBAND20MS[i] + j] = (1.0 - frac) * band_e[i - 1] + frac * band_e[i];
+    /// `interp_band_gain`: expand per-band gains to per-bin gains by linear
+    /// interpolation. Writes bins `0..EBAND20MS[NB_BANDS+1]` (=400) and zeroes the
+    /// rest of `g` — matching the upstream behaviour where callers pre-zero the buffer
+    /// and bins above 20 kHz stay silent.
+    pub(crate) fn interp_band_gain(&self, g: &mut [f32], band_e: &[f32]) {
+        for v in g[..FREQ_SIZE].iter_mut() {
+            *v = 0.0;
         }
-    }
-    for j in 0..EBAND20MS[1] {
-        g[j] = band_e[0];
-    }
-    for j in EBAND20MS[NB_BANDS]..EBAND20MS[NB_BANDS + 1] {
-        g[j] = band_e[NB_BANDS - 1];
+        for i in 1..NB_BANDS {
+            let band_size = EBAND20MS[i + 1] - EBAND20MS[i];
+            for j in 0..band_size {
+                let frac = self.band_frac[EBAND20MS[i] + j];
+                g[EBAND20MS[i] + j] = (1.0 - frac) * band_e[i - 1] + frac * band_e[i];
+            }
+        }
+        for j in 0..EBAND20MS[1] {
+            g[j] = band_e[0];
+        }
+        for j in EBAND20MS[NB_BANDS]..EBAND20MS[NB_BANDS + 1] {
+            g[j] = band_e[NB_BANDS - 1];
+        }
     }
 }
 
@@ -168,5 +181,57 @@ pub(crate) fn biquad(y: &mut [f32], mem: &mut [f32; 2], x: &[f32], b: &[f32; 2],
         mem[0] = (mem[1] as f64 + (b0 * xi - a0 * yid)) as f32;
         mem[1] = (b1 * xi - a1 * yid) as f32;
         y[i] = yi;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn band_table_is_the_same_division_as_the_runtime_computed_it() {
+        // The whole point of precomputing is that it must be bit-identical to the
+        // per-bin `j / band_size` the C code divides by.
+        let c = Common::new();
+        for i in 0..NB_BANDS + 1 {
+            let band_size = EBAND20MS[i + 1] - EBAND20MS[i];
+            for j in 0..band_size {
+                assert_eq!(
+                    c.band_frac[EBAND20MS[i] + j].to_bits(),
+                    (j as f32 / band_size as f32).to_bits(),
+                    "band {i} bin {j}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn band_energy_with_table_matches_the_division_version() {
+        let c = Common::new();
+        let mut seed = 3u32;
+        let mut next = || {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            (seed >> 8) as f32 / 16_777_216.0 - 0.5
+        };
+        let x: Vec<Cpx> = (0..FREQ_SIZE).map(|_| Cpx::new(next(), next())).collect();
+        let mut with_table = [0.0f32; NB_BANDS];
+        c.compute_band_energy(&mut with_table, &x);
+
+        let mut sum = [0.0f32; NB_BANDS + 2];
+        for i in 0..NB_BANDS + 1 {
+            let band_size = EBAND20MS[i + 1] - EBAND20MS[i];
+            for j in 0..band_size {
+                let frac = j as f32 / band_size as f32;
+                let xx = x[EBAND20MS[i] + j];
+                let tmp = xx.r * xx.r + xx.i * xx.i;
+                sum[i] += (1.0 - frac) * tmp;
+                sum[i + 1] += frac * tmp;
+            }
+        }
+        sum[1] = (sum[0] + sum[1]) * 2.0 / 3.0;
+        sum[NB_BANDS] = (sum[NB_BANDS] + sum[NB_BANDS + 1]) * 2.0 / 3.0;
+        for i in 0..NB_BANDS {
+            assert_eq!(with_table[i].to_bits(), sum[i + 1].to_bits(), "band {i}");
+        }
     }
 }

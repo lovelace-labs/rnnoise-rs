@@ -34,7 +34,36 @@ fn bench_with(label: &str, mut st: DenoiseState, frame: &[f32; FRAME_SIZE], iter
     ns
 }
 
+/// Which tier `src/simd` will actually pick on this machine (runtime, not build time).
+#[cfg(target_arch = "x86_64")]
+fn detected_tier() -> String {
+    for (name, on) in [
+        (
+            "v4 avx512f+avx512vnni",
+            std::arch::is_x86_feature_detected!("avx512f")
+                && std::arch::is_x86_feature_detected!("avx512vnni"),
+        ),
+        ("v3 avx2", std::arch::is_x86_feature_detected!("avx2")),
+        ("v2 sse4.1", std::arch::is_x86_feature_detected!("sse4.1")),
+        ("v1 sse2", std::arch::is_x86_feature_detected!("sse2")),
+    ] {
+        if on {
+            return name.to_string();
+        }
+    }
+    "scalar".to_string()
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn detected_tier() -> String {
+    "scalar (or dotprod on aarch64)".to_string()
+}
+
 fn main() {
+    println!(
+        "simd tier selected by runtime detection: {}",
+        detected_tier()
+    );
     let mut seed = 1u32;
     let mut rng = || {
         seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
