@@ -51,6 +51,13 @@ The test asserts `rel < 1e-6` and `max_diff <= 2` — far tighter than
 builds. The residual 3 LSB come from clang contracting some `a*b + c` into FMAs in
 the C build (Rust does not auto-contract), which is sub-ULP per op.
 
+The Rust float tiers never contract either, so the numbers above hold for every tier
+`simd::dispatch` can select. A forced-FMA build stays inside the bound (same 3 LSB and
+`2.003e-10` on `testing.raw`; at most 1 ULP per fused step, which can accumulate to ~1e-5
+absolute on a cancellation-heavy synthetic sum), but it is no longer bit-identical per step —
+which is why the ladder does not contain one. See
+[performance.md](performance.md#fma-and-sse41-on-x86-64-measured-and-not-shipped).
+
 The CLI demo reproduces this end-to-end:
 `./rnnoise-demo testing.raw out.raw` vs the C demo differ by the same 3 LSB.
 

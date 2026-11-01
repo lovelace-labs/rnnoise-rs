@@ -8,6 +8,8 @@
     clippy::manual_clamp,
     clippy::needless_range_loop
 )]
+
+use crate::params::MAX_Q8_INPUTS;
 /// Activation kinds used by the RNNoise model.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Activation {
@@ -73,7 +75,16 @@ const MAX_GRU_3N: usize = 1152;
 #[derive(Clone, Debug)]
 pub(crate) enum Weights {
     Float(Vec<f32>),
-    Q8 { w: Vec<i8>, scale: Vec<f32> },
+    Q8 {
+        w: Vec<i8>,
+        scale: Vec<f32>,
+        /// `128 · Σ w` per output row, computed at quantize time. Only the VNNI tier needs it:
+        /// `vpdpbusd` is unsigned × signed, so the `+128` lives in the activation domain (biased
+        /// once per layer) and each row pays this correction instead of a `vpaddb` per chunk.
+        /// Exact in `i32`, so the tier is bit-identical to the reference; the other tiers multiply
+        /// signed bytes and take it as `_corr`.
+        corr: Vec<i32>,
+    },
 }
 
 /// Storage form of a dense float layer. Both forms hold the same values; the choice is a
@@ -117,12 +128,12 @@ impl LinearLayer {
                 crate::simd::dense_sgemv_blocks(out, w, m, n, input)
             }
             (Weights::Float(w), None) => dense_sgemv(out, w, m, n, input),
-            (Weights::Q8 { w, scale }, _) => {
+            (Weights::Q8 { w, scale, corr }, _) => {
                 let mut qx = [0i8; MAX_Q8_INPUTS];
                 for (q, &x) in qx[..m].iter_mut().zip(&input[..m]) {
                     *q = quant_x(x);
                 }
-                crate::simd::dense_q8(out, w, scale, m, n, &qx[..m]);
+                crate::simd::dense_q8(out, w, scale, corr, m, n, &qx[..m]);
             }
         }
         for i in 0..n {
@@ -182,6 +193,11 @@ impl LinearLayer {
         // runtime is `out[o] = scale[o] * Σ q_w·q_x` with an int32 dot product.
         let mut scale = vec![0.0f32; n];
         let mut q = vec![0i8; n * m];
+        // `128 · Σ_q w` per output row, from the quantized row itself. Only tier v4 reads it
+        // (`simd::x86_64::vnni`): `vpdpbusd` is unsigned × signed, so the `+128` moves to the
+        // activation side and each row pays this correction instead of a `vpaddb` per chunk.
+        // Exact in `i32` for the model's widths (`128 · 1536 · 127 = 2.5e7`).
+        let mut corr = vec![0i32; n];
         for o in 0..n {
             let row = &dense[o * m..o * m + m];
             let mx = row.iter().fold(0.0f32, |a, &v| a.max(v.abs()));
@@ -192,8 +208,9 @@ impl LinearLayer {
                     *qi = quant(v * inv);
                 }
             }
+            corr[o] = 128 * q[o * m..o * m + m].iter().map(|&v| v as i32).sum::<i32>();
         }
-        self.weights = Weights::Q8 { w: q, scale };
+        self.weights = Weights::Q8 { w: q, scale, corr };
     }
 }
 
@@ -235,9 +252,6 @@ fn for_each_block(idx: &[i32], rows: usize, mut f: impl FnMut(usize, usize, usiz
 pub(crate) fn dense_sgemv(out: &mut [f32], w: &[f32], m: usize, n: usize, input: &[f32]) {
     crate::simd::dense_sgemv(out, w, m, n, input);
 }
-
-/// Largest input width of a quantized layer (conv2 and the GRUs are all 384).
-const MAX_Q8_INPUTS: usize = 384;
 
 /// `compute_generic_dense`: linear + activation.
 pub(crate) fn compute_dense(layer: &LinearLayer, out: &mut [f32], input: &[f32], act: Activation) {

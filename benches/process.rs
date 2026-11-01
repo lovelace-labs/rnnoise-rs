@@ -39,8 +39,9 @@ fn bench_with(label: &str, mut st: DenoiseState, frame: &[f32; FRAME_SIZE], iter
 fn detected_tier() -> String {
     for (name, on) in [
         (
-            "v4 avx512f+avx512vnni",
+            "v4 avx512f+avx512bw+avx512vnni",
             std::arch::is_x86_feature_detected!("avx512f")
+                && std::arch::is_x86_feature_detected!("avx512bw")
                 && std::arch::is_x86_feature_detected!("avx512vnni"),
         ),
         ("v3 avx2", std::arch::is_x86_feature_detected!("avx2")),

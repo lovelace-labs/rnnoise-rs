@@ -134,7 +134,7 @@ NN per frame).
 | v1 | SSE2 (x86-64 baseline) | `punpcklbw` + `cmpgt` sign mask + `pmaddwd` | 3.5 |
 | v2 | SSE4.1 (x86-64-v2) | `pmovsxbw` + `pmaddwd` | 6.5 |
 | v3 | AVX2 (x86-64-v3) | same shape, 16 lanes | **15.3** |
-| v4 | AVX-512 VNNI (x86-64-v4) | `vpdpbusd`, unsigned × signed → biased + corrected | ~30 (no VNNI CPU here) |
+| v4 | AVX-512 VNNI (x86-64-v4) | `vpdpbusd`, unsigned × signed; `+128` paid once per layer, per-row `128 · Σ w` correction | 27.3 on the Zen 4 core (17.1 before the shape change) |
 
 The same idea applies to the sparse 8×4 GEMV: `x86_64/sparse8x4.rs` keeps the
 eight-row accumulator in a ymm register for the whole row group instead of
@@ -156,13 +156,66 @@ story for x86.
 
 Tier v4 is available on Rust ≥ 1.89 (AVX-512 intrinsics + `avx512f` target feature),
 which is why the crate's `rust-version` is 1.89. It does not force AVX-512 codegen:
-a binary built with 1.89+ runs tier v3 on an AVX2-only CPU and v4 on a Zen 4.
+a binary built with 1.89+ runs tier v3 on an AVX2-only CPU and v4 on a Zen 4. `select`
+checks `avx512f` + `avx512bw` + `avx512vnni`, because the kernel's `set1_epi8`/`add_epi8`
+are AVX512BW instructions. `/proc/cpuinfo` prints the flags with mixed spellings — `avx512f`,
+`avx512bw`, `avx512_vnni` on the Zen 4 box — which is why the CI coverage step accepts both forms,
+since a skipped tier is not coverage.
+
+**Tier v4 on an actual Zen 4 core (Ryzen 7 7800X3D), measured.** An earlier measurement reported tier v4 as
+slower than tier v3 end to end (114.9 µs of network vs 77.5 µs, one run each) and blamed the
+per-chunk `vpaddb`. Per row — same machine, same binary, isolated kernel, the model's hot width
+(`m = 384`, `n = 1152`) — the picture is different:
+
+| shape | ns/row | MACs/cycle |
+|---|--:|--:
+| tier v3 as committed | 17.29 | 4.8 |
+| tier v3, four accumulators | 8.44 | 9.9 |
+| tier v4 as committed (`vpaddb` per chunk, one accumulator) | 4.88 | 17.1 |
+| tier v4, `+128` hoisted out of the loop | 4.77 | 17.5 |
+| tier v4, `+128` hoisted into registers, four accumulators | **3.06** | **27.3** |
+
+So the ladder's top-down assumption is not what was wrong: on this core tier v4 is ~3.5× tier v3
+per row, and the bias instruction is worth about 2% of a row, not 1.48×. The fixed per-row part
+(horizontal sum + int→float + scale + store) fits to 0.7–1 ns of a ~5 ns row — real, as that report
+suspected, but not the story. What is worth something is the load port: 6 activation loads per row
+are the same size as 6 weight loads, and keeping the biased activations in registers removes them.
+
+Landed here: `quantize()` stores the per-row `128 · Σ w` correction, the activations are biased once
+per layer at the top of the call, and the hot path — every quantized layer in the model is 384
+bytes, exactly 6 chunks — runs `load + vpdpbusd` only, with four independent accumulator chains
+because one `vpdpbusd` chain costs more than the tier's throughput. Still exact integer arithmetic,
+so tier v4 remains bit-identical to the reference. Four accumulators on **tier v3** measured 2× in
+isolation and no gain at the level the crate runs (`83.4 µs` vs `84.9 µs` of network per frame,
+median of three runs, Zen 3), so tier v3 keeps one accumulator.
+
+**Re-measured on the same box at the level the crate runs**, five rounds on one core, min, same
+toolchain:
+
+| build | tier `select` picks | int8 NN µs/frame | ns/row | full frame |
+|---|---|--:|--:|--:|
+| tier v4 as it now is (bias hoisted into registers, 4 accumulators) | v4 | **45.5** | 5.25 | 66.8 |
+| tier v4 as previously measured (`vpaddb` per chunk, 1 accumulator) | v4 | 52.8 | 6.25 | 74.0 |
+| tier v3 (AVX-512 branch forced off) | v3 | 78.2 | 9.73 | 99.4 |
+| float path, same box, same binary | — | 114.4 | — | 136.1 |
+
+So the report's premise was a measurement error, not an ISA fact: the 114.9 µs / 135.9 µs attributed to
+tier v4 are the **float path's** numbers (114.4 / 136.1 on the same core, within noise) — its
+tier v3 row (77.5 / 98.5) does match the AVX2 tier. Tier v4 was never slower than tier v3 on this
+core; it was 52.8 vs 78.2 µs at the old shape and 45.5 vs 78.2 at the committed one. The ladder
+stays top-down, so `select` does not get a per-ISA table.
+
+One methodological point for the tier tables: an isolated kernel and the crate do not measure the
+same thing. The shape ratios above are real, but the crate damps them — a 37% per-row shape gain
+came out as 16% end to end, because the isolated kernel keeps 442 KB hot in L2 while the model
+streams 2.8 MB of int8 weights per frame from L3. Per-row numbers in this doc must say which level
+they were taken at.
 
 Every int8 tier produces the **same exact integer** (products and pair sums fit in `i32`
 for the model's widths), so the quantized output is unchanged — the accuracy test
 still reports `rel_energy 4.826e-6`, and `src/simd/tests.rs` asserts tier == scalar
 for every tier the CPU reports, skipping the others. The VNNI bias identity
-(`Σ(w+128)·x − 128·Σx == Σ w·x`) is also unit-tested in pure Rust, so it is checked
+(`Σ u8(x+128)·w − 128·Σ w == Σ x·w`) is also unit-tested in pure Rust, so it is checked
 even on runners without AVX-512.
 
 ### Block-major dense float GEMV (parity-safe, x86-64 tier)
@@ -198,8 +251,66 @@ selected at runtime):
 
 Without a fused multiply-add the ceiling is 8 MACs/cycle (one 32-byte weight load plus one
 mul and one add per group of eight). The row-major shape reaches ~5.1, the block shape ~6.7,
-so the float GEMV is now within about 20% of what this core can do; the remaining step is
-FMA, which changes the rounding and is therefore not allowed by the parity bound.
+so the float GEMV is now within about 20% of what this core can do; the only remaining step
+is FMA, which changes the rounding per step and is therefore not allowed by the parity
+bound — and, measured below, is not worth taking.
+
+### FMA and SSE4.1 on x86-64: measured, and not shipped
+
+Hand-written SSE4.1 and
+AVX2 + FMA float kernels were considered, with runtime detection and a target of "at least 3× faster than
+the x86 float path". Runtime detection and the
+AVX2 float tiers are done (above); the rest was measured on this core and closed without
+shipping code, for three reasons.
+
+**The 3× target is not reachable.** The float GEMV
+is instruction-throughput bound, not cache bound: with an L1-resident matrix the plain tier
+does 4.0 MACs/cycle, the best 4-chain FMA build 6.4–7.6 → **1.6–1.9×**, not 3×. Separately,
+the frame streams 11.3 MB of float weights at ~45 GB/s, i.e. the per-core L3 ceiling, so 3×
+would need weight reuse across streams (batch: measured 1.19× on one core, it pays only when
+several cores are bandwidth-bound) or fewer bytes per MAC (int8 — already; int4 — at a
+quality cost). So the criterion is closed at ~1.6–1.9× of the *pre-tier* baseline.
+
+**On top of the committed tiers, FMA buys ≤1.2× on the row-major shapes and nothing on the
+block shapes.** Explicit `#[target_feature(enable = "avx2", enable = "fma")]` kernels, same
+shapes and same accumulation order, tight per-kernel loops (200 warm-up + 2000 iterations,
+the fixture used by `simd/tests.rs`):
+
+| shape | committed AVX2 tier | explicit FMA | ratio |
+|---|--:|--:|--:|
+| 384×1152 row-major | 43.98 µs | 35.93 µs | **1.22×** |
+| 384×1152 block-major | 15.99 | 16.08 | 1.00 (noise) |
+| 384×384 row-major | 13.01 | 11.58 | 1.12× |
+| 384×384 block-major | 4.85 | 4.90 | ~1.00 |
+| 1536×32 row-major | 5.64 | 4.88 | 1.16× |
+| 1536×32 block-major | 1.34 | 1.33 | ~1.00 |
+
+The block-major shape is where the model's GRUs run, and it already issues one load plus one
+mul and one add per group of eight — one µop per eight MACs, which is the 256-bit FP issue
+ceiling of this core. FMA cannot beat that; it only shortens the row-major kernels' op count.
+End to end, six alternating rounds pinned to one core, min of runs: float full frame **159.1
+µs** (committed tiers) vs **160.5 µs** (explicit FMA) — no measurable gain.
+
+Cross-check on a Zen 4 core (Ryzen 7 7800X3D), where a fused op is one 512-bit µop: default
+codegen vs `-C target-cpu=znver4`, two runs each, float full frame **138.7 / 138.8 µs** vs
+**138.2 / 138.6 µs** — no gain there either. Read that as the codegen *around* the tiers,
+since `-C target-cpu` cannot change the hand-written kernels (they use explicit mul and add by
+design); the tier itself is what was measured on Zen 3 above.
+
+**And it costs the parity guarantee.** A fused step does not round the product before the
+add, so the tier cannot be bit-identical to the portable reference: at most 1 ULP per step,
+which on a cancellation-heavy depth-384 synthetic sum measures as ~1000 ULP per element
+(~1e-5 absolute, ~1 LSB on the output samples). It stays inside the parity bound
+(`tests/parity.rs` gives the same numbers with an FMA build), but it weakens the crate's
+headline claim. An FMA tier therefore has to be opt-in, and here it would be an opt-in
+feature for ≤1.2× on the row-major shapes only — not worth a second float ladder. If a core
+clears the ~1.5× bar in the future, it goes in as an optional `fma` Cargo feature,
+runtime-detected like every other tier.
+
+**SSE4.1 is not a float tier at all.** What SSE4.1 adds to these loops is the int8
+`pmovsxbw` widen (int8 tier v2, already shipped). For `f32` it is the same 4-lane width as
+SSE2 — a hand-written SSE4.1 float kernel would be the SSE2 kernel under a different name.
+The float ladder stays SSE2 + AVX2.
 
 ## Head-to-head against the pre-SIMD baseline (`74b46b1`)
 

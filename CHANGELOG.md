@@ -42,6 +42,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   root, so `rnnoise::FRAME_SIZE` and friends keep their paths. No `unwrap()` is left in
   `src/`. `tests/api_surface.rs` names every exported item, so a public rename is a compile
   failure.
+- The AVX-512 VNNI tier pays the `+128` bias that `vpdpbusd` needs once per layer instead of
+  once per chunk, so its hot loop is one load plus one `vpdpbusd`: 52.8 → 45.5 µs of network
+  per frame on a Zen 4 core, still bit-identical to the scalar reference.
+
+### Fixed
+
+- The AVX-512 VNNI kernel subtracted the bias correction over the whole activation vector
+  instead of the row length, so layers narrower than the activation vector disagreed with
+  the reference.
 
 ## [0.1.0]
 

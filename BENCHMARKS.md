@@ -148,7 +148,7 @@ opt-in; the float model stays the default. (A naive dequant-to-f32 int8 loop, by
 contrast, measured *0.81×* — slower — confirming the win is the instruction-count
 reduction, not bandwidth.)
 
-### 2. x86 int8 SIMD — ✅ *implemented (AVX2), VNNI pending*
+### 2. x86 int8 SIMD — ✅ *implemented (SSE2 → SSE4.1 → AVX2 → VNNI, runtime-detected)*
 
 `src/simd/` dispatches per architecture. On x86-64 the kernel is
 `pmovsxbw` + `pmaddwd` (runtime AVX2 detection); before that the int8 path had no
@@ -158,10 +158,43 @@ int8 net 487 → **88 µs** (5.6×), full frame 519 → **120 µs** (84× real t
 legacy 40.2 → 37.8 µs. Still exact int32, so output is unchanged.
 
 `vpdpbusd` (AVX-VNNI / AVX-512-VNNI, 64 MACs per instruction on Zen 4+ / Ice
-Lake+) is the remaining step: it is unsigned × signed, so it needs a biased weight
-domain plus a `128 · Σ q_x` correction (and the 512-bit `core::arch` types postdate
-the crate's `rust-version`). Estimated another 2–4× on such CPUs; not measurable on
-the Zen 3 box used here.
+Lake+) is now tier v4 of the int8 ladder: it is unsigned × signed, so it needs a biased
+weight domain plus a `128 · Σ q_x` correction (`simd/x86_64/vnni.rs`, asserted exact by
+`simd/tests.rs`), and it is only *used* when CPUID reports `avx512f` + `avx512bw` +
+`avx512vnni` (`set1_epi8`/`add_epi8` are AVX512BW) — which is why `rust-version` is 1.89.
+
+**Measured on a Zen 4 core (Ryzen 7 7800X3D), per row** — same machine, same binary, isolated
+kernel, `m = 384`, `n = 1152` — the tier is faster, and the bias op is not the reason it was
+thought to lose:
+
+| shape | ns/row |
+|---|--:|
+| tier v3 as committed | 17.29 |
+| tier v3, four accumulators | 8.44 |
+| tier v4 as committed (`vpaddb` per chunk, one accumulator) | 4.88 |
+| tier v4, `+128` hoisted out of the loop | 4.77 |
+| tier v4, `+128` hoisted into registers + four accumulators | **3.06** |
+
+`vpdpbusd` does win on this core (≈3.5× tier v3 per row); the `vpaddb` is worth ~2% of a row, and
+the fixed per-row cost (horizontal sum, int→float, scale, store) is ~0.7–1 ns of a ~5 ns row. The
+change that landed is the one the shapes pay for: `quantize()` now stores the per-row `128 · Σ w`
+correction, the activations are biased once per layer, and the 6-chunk hot loop is `load +
+vpdpbusd` only. ARM is unaffected either way: `sdot` is signed × signed and needs no bias.
+
+**Re-measured on the same box, five rounds on one core, min** — an earlier report of tier v4
+being slower than tier v3 was a measurement error. The 114.9 µs / 135.9 µs row it quoted as tier v4 is the *float* path (114.4 / 136.1 on this
+core); its tier v3 row (77.5 / 98.5) is genuine. Tier v4 was never slower than tier v3 here:
+
+| | int8 NN µs/frame | ns/row | full frame |
+|---|--:|--:|--:|
+| tier v4, shape as committed | **45.5** | 5.25 | 66.8 |
+| tier v4, previous shape (`vpaddb` per chunk) | 52.8 | 6.25 | 74.0 |
+| tier v3 (AVX-512 branch forced off) | 78.2 | 9.73 | 99.4 |
+| float path, same binary | 114.4 | — | 136.1 |
+
+The shape change is worth 1.16× end to end, not the 1.37× per row it measures in isolation: the
+isolated kernel keeps 442 KB hot in L2, the model streams 2.8 MB of int8 weights per frame from L3,
+so the crate damps shape ratios. `select` stays top-down.
 
 ### 3. f16 weights + f16 SIMD — *medium win (future)*
 
@@ -191,9 +224,14 @@ custom one) trades some quality for speed and footprint.
 
 ### Recommended priority
 
-int8 + `sdot` (#1) is done and is the big lever on ARM. Next: VNNI for x86 (#2),
-then the real-input FFT (#5) for a broad front-end win; f16 (#3) and threading
-(#4) as needed.
+int8 + `sdot` is done and is the big lever on ARM; the x86 int8 ladder is
+done too, per ISA tier, runtime-detected. The x86 **float** path is at its throughput ceiling: the
+tiers landed, the "3×" acceptance criterion was measured to be unreachable (1.6–1.9× of the
+pre-tier baseline; ≤1.2× for the FMA variant on top of the committed block-major tier), and
+an SSE4.1 float tier would be the SSE2 kernel with a different name — see
+[doc/performance.md](doc/performance.md#fma-and-sse41-on-x86-64-measured-and-not-shipped).
+Next: the real-input FFT for a broad front-end win; f16 and threading as
+needed.
 
 ## Reproduce
 

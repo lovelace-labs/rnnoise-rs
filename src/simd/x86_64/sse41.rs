@@ -38,6 +38,7 @@ pub(crate) unsafe fn dense_q8(
     out: &mut [f32],
     w: &[i8],
     scale: &[f32],
+    _corr: &[i32],
     m: usize,
     n: usize,
     qx: &[i8],

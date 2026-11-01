@@ -12,7 +12,9 @@
 //! ```
 //!
 //! The float kernels (`dense`, `sparse8x4`, `xcorr`) use the SSE2 baseline tier and an
-//! AVX2 tier where it helps.
+//! AVX2 tier where it helps; there is deliberately no SSE4.1 float tier — SSE4.1 is the same
+//! 4-lane width for `f32`, so it adds nothing beyond the int8 `pmovsxbw` widen, and the float
+//! tiers are never allowed to fuse a multiply with an add (parity).
 //!
 //! Tier v4 needs Rust ≥ 1.89 (the AVX-512 intrinsics and the `avx512f` target
 //! feature are stable from there), which is why `rust-version` is 1.89. It is still

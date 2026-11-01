@@ -97,9 +97,21 @@ nnnoiseless 0.32 s (smaller/older model). The NN is 89 % of each frame and is
       sparse indices in dense row-major form (`weights.rs`) — the shipped model's GRU
       matrices qualify, so they run through the wider tier with provably identical
       accumulation order. Float NN 239 → 192 µs/frame on Zen 3.
-- [ ] **AVX-VNNI / AVX-512-VNNI (`vpdpbusd`)** for Zen 4+ / Ice Lake+: unsigned ×
-      signed, so it needs a biased weight domain plus a `128 · Σ q_x` correction;
-      estimated another 2–4× on the int8 net, not measurable on the Zen 3 box.
+- [x] **AVX-VNNI / AVX-512-VNNI (`vpdpbusd`)** for Zen 4+ / Ice Lake+: unsigned ×
+      signed, so it needs a biased weight domain plus a `128 · Σ q_x` correction
+      (`simd/x86_64/vnni.rs`, tier v4, the bias identity asserted in `simd/tests.rs`);
+      used only when CPUID reports `avx512f` + `avx512vnni`, which is why `rust-version`
+      is 1.89. Not measurable on the Zen 3 box.
+- [x] **FMA and SSE4.1 float tiers** —
+      measured and closed without shipping code. On the Zen 3 core the float ladder is at its
+      throughput ceiling: explicit `avx2 + fma` kernels give ≤1.2× on the row-major shapes
+      (384×1152: 43.98 → 35.93 µs) and nothing on the block-major ones where the GRUs run,
+      so end to end there is no measurable gain (float full frame 159.1 vs 160.5 µs, min of
+      six alternating rounds). FMA is also not bit-exact (≤1 ULP per step, ~1e-5 absolute
+      worst case on a cancellation-heavy depth-384 sum), which the parity rule does not allow
+      as a default path. SSE4.1 adds no `f32` width over SSE2, so there is nothing to write.
+      The "3×" target measures **1.6–1.9×** against the pre-tier baseline. Full
+      numbers in [doc/performance.md](doc/performance.md).
 - [ ] **f16 weights + f16 SIMD** (~1.5–2× on ARM); less accuracy loss than int8.
 - [ ] Multi-thread the per-layer GEMVs across cores (best for offline/batch).
 - [x] Tighten the x86-64 front-end: bit-exact SIMD butterflies (`fft/x86_64.rs`),

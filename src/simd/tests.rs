@@ -9,7 +9,14 @@ use crate::simd::scalar;
 const M: usize = 384; // a real layer width (conv2 / GRU)
 const ROWS: usize = 64;
 
-fn fixture() -> (Vec<i8>, Vec<i8>, Vec<f32>) {
+/// `128 · Σ_q w` per row — exactly what `LinearLayer::quantize` stores for tier v4.
+fn row_corr(w: &[i8], m: usize, n: usize) -> Vec<i32> {
+    (0..n)
+        .map(|o| 128 * w[o * m..o * m + m].iter().map(|&v| v as i32).sum::<i32>())
+        .collect()
+}
+
+fn fixture() -> (Vec<i8>, Vec<i8>, Vec<f32>, Vec<i32>) {
     let mut s = 7u32;
     let mut next = || {
         s = s.wrapping_mul(1664525).wrapping_add(1013904223);
@@ -18,52 +25,83 @@ fn fixture() -> (Vec<i8>, Vec<i8>, Vec<f32>) {
     let w: Vec<i8> = (0..ROWS * M).map(|_| next()).collect();
     let qx: Vec<i8> = (0..M).map(|_| next()).collect();
     let scale: Vec<f32> = (0..ROWS).map(|i| (i as f32 + 1.0) * 1e-4).collect();
-    (w, qx, scale)
+    let corr = row_corr(&w, M, ROWS);
+    (w, qx, scale, corr)
+}
+
+/// Reports what this CPU can actually run. A green CI run is not coverage of a tier that
+/// was skipped, so the test says which tiers it exercised; `is_x86_feature_detected!` needs
+/// a literal feature name, so there is no loop here.
+#[cfg(target_arch = "x86_64")]
+fn tier_coverage(skipped: &[&str]) {
+    if skipped.is_empty() {
+        eprintln!("x86-64 tier coverage: every tier ran here");
+    } else {
+        eprintln!("x86-64 tier coverage: skipped {skipped:?} (not detected on this CPU)");
+    }
 }
 
 #[cfg(target_arch = "x86_64")]
 #[test]
 fn every_x86_tier_matches_scalar() {
-    let (w, qx, scale) = fixture();
+    let (w, qx, scale, corr) = fixture();
     let mut reference = vec![0.0f32; ROWS];
-    scalar::dense_q8(&mut reference, &w, &scale, M, ROWS, &qx);
+    scalar::dense_q8(&mut reference, &w, &scale, &corr, M, ROWS, &qx);
 
     let mut out = vec![0.0f32; ROWS];
-    unsafe { crate::simd::x86_64::sse2::dense_q8(&mut out, &w, &scale, M, ROWS, &qx) };
+    unsafe { crate::simd::x86_64::sse2::dense_q8(&mut out, &w, &scale, &corr, M, ROWS, &qx) };
     assert_eq!(out, reference, "tier v1 (SSE2) diverged");
 
-    if std::arch::is_x86_feature_detected!("sse4.1") {
+    let mut skipped = Vec::new();
+    let sse41 = std::arch::is_x86_feature_detected!("sse4.1");
+    let avx2 = std::arch::is_x86_feature_detected!("avx2");
+    let vnni = std::arch::is_x86_feature_detected!("avx512f")
+        && std::arch::is_x86_feature_detected!("avx512bw")
+        && std::arch::is_x86_feature_detected!("avx512vnni");
+
+    if sse41 {
         out.iter_mut().for_each(|v| *v = 0.0);
-        unsafe { crate::simd::x86_64::sse41::dense_q8(&mut out, &w, &scale, M, ROWS, &qx) };
+        unsafe { crate::simd::x86_64::sse41::dense_q8(&mut out, &w, &scale, &corr, M, ROWS, &qx) };
         assert_eq!(out, reference, "tier v2 (SSE4.1) diverged");
+    } else {
+        skipped.push("v2 (SSE4.1)");
     }
-    if std::arch::is_x86_feature_detected!("avx2") {
+    if avx2 {
         out.iter_mut().for_each(|v| *v = 0.0);
-        unsafe { crate::simd::x86_64::avx2::dense_q8(&mut out, &w, &scale, M, ROWS, &qx) };
+        unsafe { crate::simd::x86_64::avx2::dense_q8(&mut out, &w, &scale, &corr, M, ROWS, &qx) };
         assert_eq!(out, reference, "tier v3 (AVX2) diverged");
+    } else {
+        skipped.push("v3 (AVX2)");
     }
-    if std::arch::is_x86_feature_detected!("avx512f")
-        && std::arch::is_x86_feature_detected!("avx512vnni")
-    {
+    if vnni {
+        // The hot width: tier v4's 6-chunk path, activations in registers.
         out.iter_mut().for_each(|v| *v = 0.0);
-        unsafe { crate::simd::x86_64::vnni::dense_q8(&mut out, &w, &scale, M, ROWS, &qx) };
+        unsafe { crate::simd::x86_64::vnni::dense_q8(&mut out, &w, &scale, &corr, M, ROWS, &qx) };
         assert_eq!(out, reference, "tier v4 (VNNI) diverged");
+    } else {
+        skipped.push("v4 (VNNI)");
     }
 
-    // Widths that are not a multiple of the vector size exercise the tail loops.
+    // Widths that are not a multiple of the vector size exercise the tail loops, and a row
+    // narrower than the activation buffer needs the narrower `128 · Σ w` correction.
     for width in [7usize, 33, 65] {
+        let c = row_corr(&w, width, ROWS);
         let mut r = vec![0.0f32; ROWS];
         let mut o = vec![0.0f32; ROWS];
-        scalar::dense_q8(&mut r, &w, &scale, width, ROWS, &qx);
-        unsafe { crate::simd::x86_64::sse2::dense_q8(&mut o, &w, &scale, width, ROWS, &qx) };
+        scalar::dense_q8(&mut r, &w, &scale, &c, width, ROWS, &qx);
+        unsafe { crate::simd::x86_64::sse2::dense_q8(&mut o, &w, &scale, &c, width, ROWS, &qx) };
         assert_eq!(o, r, "tier v1 tail, width {width}");
-        unsafe { crate::simd::x86_64::avx2::dense_q8(&mut o, &w, &scale, width, ROWS, &qx) };
+        unsafe { crate::simd::x86_64::avx2::dense_q8(&mut o, &w, &scale, &c, width, ROWS, &qx) };
         assert_eq!(o, r, "tier v3 tail, width {width}");
-        if std::arch::is_x86_feature_detected!("avx512f") {
-            unsafe { crate::simd::x86_64::vnni::dense_q8(&mut o, &w, &scale, width, ROWS, &qx) };
+        if vnni {
+            unsafe {
+                crate::simd::x86_64::vnni::dense_q8(&mut o, &w, &scale, &c, width, ROWS, &qx)
+            };
             assert_eq!(o, r, "tier v4 tail, width {width}");
         }
     }
+
+    tier_coverage(&skipped);
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -72,36 +110,44 @@ fn sdot_matches_scalar() {
     if !std::arch::is_aarch64_feature_detected!("dotprod") {
         return;
     }
-    let (w, qx, scale) = fixture();
+    let (w, qx, scale, corr) = fixture();
     let mut reference = vec![0.0f32; ROWS];
-    scalar::dense_q8(&mut reference, &w, &scale, M, ROWS, &qx);
+    scalar::dense_q8(&mut reference, &w, &scale, &corr, M, ROWS, &qx);
     let mut out = vec![0.0f32; ROWS];
-    unsafe { crate::simd::aarch64::dense_q8(&mut out, &w, &scale, M, ROWS, &qx) };
+    unsafe { crate::simd::aarch64::dense_q8(&mut out, &w, &scale, &corr, M, ROWS, &qx) };
     assert_eq!(out, reference, "sdot diverged");
 }
 
 #[test]
 fn vnni_bias_identity_is_exact() {
-    // `vpdpbusd` is unsigned × signed, so tier v4 accumulates `Σ (w+128)·x` and
-    // subtracts `128 · Σ x`. This is the whole correctness argument for the tier,
-    // and it is checkable without an AVX-512 CPU (CI runners usually have none).
-    let (w, qx, _) = fixture();
-    let plain: i32 = w.iter().zip(&qx).map(|(&a, &b)| a as i32 * b as i32).sum();
-    let biased: i32 = w
-        .iter()
-        .zip(&qx)
-        .map(|(&a, &b)| (a as i32 + 128) * b as i32)
-        .sum();
-    let sum_x: i32 = qx.iter().map(|&v| v as i32).sum();
-    assert_eq!(
-        biased - 128 * sum_x,
-        plain,
-        "tier v4 bias correction is not exact"
-    );
-    assert!(
-        biased.abs() <= 384 * 255 * 127,
-        "i32 accumulator would overflow"
-    );
+    // `vpdpbusd` is unsigned × signed, so tier v4 accumulates `Σ u8(q_x + 128) · w` in the hot
+    // loop and subtracts `128 · Σ w` per row (the `row_corr` table). That is the whole
+    // correctness argument for the tier, and it is checkable without an AVX-512 CPU — CI runners
+    // usually have none.
+    let (w, qx, _, _) = fixture();
+    for row_len in [7usize, 33, 65, M] {
+        let row = &w[..row_len];
+        let plain: i32 = row
+            .iter()
+            .zip(&qx)
+            .map(|(&a, &b)| a as i32 * b as i32)
+            .sum();
+        let biased: i32 = row
+            .iter()
+            .zip(&qx)
+            .map(|(&a, &b)| a as i32 * (b as i32 + 128))
+            .sum();
+        let sum_w: i32 = row.iter().map(|&v| v as i32).sum();
+        assert_eq!(
+            biased - 128 * sum_w,
+            plain,
+            "tier v4 bias correction is not exact at row length {row_len}"
+        );
+        assert!(
+            biased.abs() <= 384 * 255 * 127,
+            "i32 accumulator would overflow"
+        );
+    }
 }
 
 #[cfg(target_arch = "x86_64")]

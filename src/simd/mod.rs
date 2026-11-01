@@ -8,7 +8,9 @@
 //! The float kernels are exact in a different way: they keep the reference's
 //! accumulation order (one accumulator per output element, or per lag, in `j` order),
 //! and never fuse a multiply with an add, so a tier produces the same bits as
-//! [`scalar`] on the same input.
+//! [`scalar`] on the same input. That is a deliberate design decision, not an oversight: a
+//! fused tier is measurably not worth the loss of exactness (≤1.2× on the row-major shapes,
+//! nothing on the block-major ones, on a Zen 3 core — see `doc/performance.md`).
 //!
 //! Which tier runs is decided at **runtime** by `dispatch` (CPUID + cached feature
 //! flags), not at build time: the crate compiles for the plain `x86-64` baseline
