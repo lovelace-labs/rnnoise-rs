@@ -1,42 +1,33 @@
-//! Per-frame throughput micro-benchmark (no external dependencies).
+//! Per-frame throughput benchmark for `cargo bench`.
 //!
-//! Reports the steady-state cost of `process_frame` on an active (never-silent)
-//! frame, plus an ablation: feeding silence skips the neural network, so
-//! `full - frontend ≈ NN cost`. Useful for the speed-up analysis in
-//! `BENCHMARKS.md`.
+//! Criterion groups:
+//!
+//! - `float`     — the default (float model) path;
+//! - `int8`      — `RnnModel::quantized()`, the opt-in int8 path;
+//! - `legacy`    — the optional old model (`legacy-model` feature);
+//! - each group has an `active` (never silent, so the network runs) and a `silent`
+//!   (front-end only, network skipped) input, which is the ablation `BENCHMARKS.md`
+//!   uses to split front-end cost from neural-net cost.
+//!
+//! The header prints the SIMD tier runtime detection selected, so a number from a CI
+//! runner can be attributed to a tier. `RNNOISE_SIMD_TIER` applies only when the crate
+//! is built with the opt-in `simd-tier-override` feature (CI's bench job sets both), so
+//! one path can be measured against another on the same machine.
+//!
+//! CI runs `cargo bench -- --save-baseline ci` and uploads the JSON as an artifact.
 
-use std::hint::black_box;
+// `criterion_group!` generates items that `missing_docs` cannot be satisfied for.
+#![allow(missing_docs)]
+
 use std::sync::Arc;
-use std::time::Instant;
+
+use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 
 use rnnoise::{DenoiseState, RnnModel, FRAME_SIZE};
 
-fn bench(label: &str, frame: &[f32; FRAME_SIZE], iters: usize) -> f64 {
-    bench_with(label, DenoiseState::new(), frame, iters)
-}
-
-fn bench_with(label: &str, mut st: DenoiseState, frame: &[f32; FRAME_SIZE], iters: usize) -> f64 {
-    let mut out = [0.0f32; FRAME_SIZE];
-    for _ in 0..200 {
-        st.process_frame(&mut out, frame);
-    }
-    let start = Instant::now();
-    for _ in 0..iters {
-        st.process_frame(black_box(&mut out), black_box(frame));
-    }
-    let ns = start.elapsed().as_nanos() as f64 / iters as f64;
-    let rtf = (FRAME_SIZE as f64 / 48_000.0) / (ns / 1e9);
-    println!(
-        "{label:<22} {:>9.1} µs/frame   {:>6.1}× real time",
-        ns / 1000.0,
-        rtf
-    );
-    ns
-}
-
 /// Which tier `src/simd` will actually pick on this machine (runtime, not build time).
 #[cfg(target_arch = "x86_64")]
-fn detected_tier() -> String {
+fn detected_tier() -> &'static str {
     for (name, on) in [
         (
             "v4 avx512f+avx512bw+avx512vnni",
@@ -49,100 +40,100 @@ fn detected_tier() -> String {
         ("v1 sse2", std::arch::is_x86_feature_detected!("sse2")),
     ] {
         if on {
-            return name.to_string();
+            return name;
         }
     }
-    "scalar".to_string()
+    "scalar"
 }
 
-#[cfg(not(target_arch = "x86_64"))]
-fn detected_tier() -> String {
-    "scalar (or dotprod on aarch64)".to_string()
-}
-
-fn main() {
-    println!(
-        "simd tier selected by runtime detection: {}",
-        detected_tier()
-    );
-    let mut seed = 1u32;
-    let mut rng = || {
-        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
-        (seed >> 8) as f32 / 16_777_216.0 - 0.5
-    };
-    // Active frame: tone + noise (never silent -> NN always runs).
-    let mut active = [0.0f32; FRAME_SIZE];
-    for (i, s) in active.iter_mut().enumerate() {
-        *s = 3000.0 * (i as f32 * 0.05).sin() + 2000.0 * rng();
+#[cfg(target_arch = "aarch64")]
+fn detected_tier() -> &'static str {
+    if std::arch::is_aarch64_feature_detected!("dotprod") {
+        "dotprod"
+    } else {
+        "scalar"
     }
-    // Silent frame: NN is skipped (front-end only).
+}
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+fn detected_tier() -> &'static str {
+    "scalar"
+}
+
+/// Tone + noise: never silent, so the neural network runs on every frame.
+fn active_frame() -> [f32; FRAME_SIZE] {
+    let mut seed = 1u32;
+    let mut frame = [0.0f32; FRAME_SIZE];
+    for (i, s) in frame.iter_mut().enumerate() {
+        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+        let noise = (seed >> 8) as f32 / 16_777_216.0 - 0.5;
+        *s = 3000.0 * (i as f32 * 0.05).sin() + 2000.0 * noise;
+    }
+    frame
+}
+
+fn measure(
+    criterion: &mut Criterion,
+    group: &str,
+    state: &mut DenoiseState,
+    active: &[f32; FRAME_SIZE],
+) {
+    let mut out = [0.0f32; FRAME_SIZE];
+    // Warm up: build the shared tables and run a few frames before measuring.
+    for _ in 0..200 {
+        state.process_frame(&mut out, active);
+    }
     let silent = [0.0f32; FRAME_SIZE];
+    let mut g = criterion.benchmark_group(group);
+    // One frame is 10 ms of audio at 48 kHz, so the "real time" factor in the summary
+    // comes straight from these numbers: 10 ms / sample_time.
+    g.throughput(Throughput::Elements(1));
+    g.bench_function("active", |b| {
+        b.iter(|| state.process_frame(black_box(&mut out), black_box(active)))
+    });
+    g.bench_function("silent", |b| {
+        b.iter(|| state.process_frame(black_box(&mut out), black_box(&silent)))
+    });
+    g.finish();
+}
 
-    let iters = 20_000;
-    println!("rnnoise-rs (float, default) per-frame ({iters} iters):");
-    let full = bench("  full (active)", &active, iters);
-    let frontend = bench("  front-end (silent)", &silent, iters);
-    let nn = full - frontend;
-    println!(
-        "  -> neural net ≈    {:>9.1} µs/frame   ({:.0}% of full)",
-        nn / 1000.0,
-        100.0 * nn / full
-    );
+fn bench(criterion: &mut Criterion) {
+    eprintln!("simd tier detected: {}", detected_tier());
+    match std::env::var("RNNOISE_SIMD_TIER") {
+        Ok(requested) if !requested.is_empty() => eprintln!(
+            "simd tier requested: {requested} (honoured because `simd-tier-override` is enabled)"
+        ),
+        _ => {}
+    }
 
-    println!("\nrnnoise-rs (int8 quantized) per-frame:");
-    let q = Arc::new(RnnModel::default().quantized());
-    let qfull = bench_with(
-        "  full (active)",
-        DenoiseState::new_with_model(q.clone()),
-        &active,
-        iters,
-    );
-    let qfront = bench_with(
-        "  front-end (silent)",
-        DenoiseState::new_with_model(q),
-        &silent,
-        iters,
-    );
-    println!(
-        "  -> neural net ≈    {:>9.1} µs/frame   (vs {:.1} float → {:.2}× speedup)",
-        (qfull - qfront) / 1000.0,
-        nn / 1000.0,
-        nn / (qfull - qfront)
-    );
-    println!(
-        "  -> full frame      {:>9.1} µs/frame   ({:.1}× real time, {:.2}× vs float full)",
-        qfull / 1000.0,
-        (FRAME_SIZE as f64 / 48_000.0) / (qfull / 1e9),
-        full / qfull
-    );
+    let active = active_frame();
+
+    let mut float_state = DenoiseState::new();
+    measure(criterion, "float", &mut float_state, &active);
+
+    let quantized = Arc::new(RnnModel::default().quantized());
+    let mut int8_state = DenoiseState::new_with_model(quantized);
+    measure(criterion, "int8", &mut int8_state, &active);
 
     #[cfg(feature = "legacy-model")]
     {
         use rnnoise::DenoiseStateV1;
-        let run = |frame: &[f32; FRAME_SIZE]| -> f64 {
-            let mut st = DenoiseStateV1::new();
-            let mut out = [0.0f32; FRAME_SIZE];
-            for _ in 0..200 {
-                st.process_frame(&mut out, frame);
-            }
-            let start = Instant::now();
-            for _ in 0..iters {
-                st.process_frame(black_box(&mut out), black_box(frame));
-            }
-            start.elapsed().as_nanos() as f64 / iters as f64
-        };
-        println!("\nrnnoise-rs (legacy / old model) per-frame:");
-        let lfull = run(&active);
-        let lfront = run(&silent);
-        let rtf = (FRAME_SIZE as f64 / 48_000.0) / (lfull / 1e9);
-        println!(
-            "  full (active)      {:>9.1} µs/frame   {rtf:.1}× real time",
-            lfull / 1000.0
-        );
-        println!("  front-end (silent) {:>9.1} µs/frame", lfront / 1000.0);
-        println!(
-            "  -> neural net ≈    {:>9.1} µs/frame",
-            (lfull - lfront) / 1000.0
-        );
+        let mut legacy = DenoiseStateV1::new();
+        let mut out = [0.0f32; FRAME_SIZE];
+        for _ in 0..200 {
+            legacy.process_frame(&mut out, &active);
+        }
+        let silent = [0.0f32; FRAME_SIZE];
+        let mut g = criterion.benchmark_group("legacy");
+        g.bench_function("active", |b| {
+            b.iter(|| legacy.process_frame(black_box(&mut out), black_box(&active)))
+        });
+        g.bench_function("silent", |b| {
+            b.iter(|| legacy.process_frame(black_box(&mut out), black_box(&silent)))
+        });
+        g.finish();
     }
 }
+
+criterion_group!(benches, bench);
+criterion_main!(benches);

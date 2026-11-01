@@ -19,6 +19,7 @@
 
 mod dispatch;
 mod scalar;
+mod tier;
 
 // Unsafe island; the glob import is because `core::arch` intrinsics cannot be
 // imported one by one.
@@ -32,7 +33,11 @@ mod x86_64;
 #[allow(unsafe_code, clippy::wildcard_imports)] // unsafe island + glob exemption
 #[cfg(test)]
 mod tests;
+// Per-tier CI coverage (no unsafe: everything goes through `dispatch`).
+#[cfg(test)]
+mod coverage;
 
 #[cfg(feature = "legacy-model")]
 pub(crate) use dispatch::i8_dot;
 pub(crate) use dispatch::{dense_q8, dense_sgemv, dense_sgemv_blocks, sparse_sgemv8x4, xcorr};
+pub(crate) use tier::Tier;

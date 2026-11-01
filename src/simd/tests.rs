@@ -5,9 +5,36 @@
 // bit-identical to the portable reference; the target_feature guard is the caller's.
 
 use crate::simd::scalar;
+use crate::simd::Tier;
 
 const M: usize = 384; // a real layer width (conv2 / GRU)
 const ROWS: usize = 64;
+
+#[cfg(target_arch = "x86_64")]
+const LADDER: &[Tier] = &[
+    Tier::Vnni,
+    Tier::Avx2,
+    Tier::Sse41,
+    Tier::Sse2,
+    Tier::Scalar,
+];
+#[cfg(target_arch = "aarch64")]
+const LADDER: &[Tier] = &[Tier::Dotprod, Tier::Scalar];
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+const LADDER: &[Tier] = &[Tier::Scalar];
+
+#[cfg(target_arch = "x86_64")]
+const TIER_NAMES: &[Tier] = &[
+    Tier::Scalar,
+    Tier::Sse2,
+    Tier::Sse41,
+    Tier::Avx2,
+    Tier::Vnni,
+];
+#[cfg(target_arch = "aarch64")]
+const TIER_NAMES: &[Tier] = &[Tier::Scalar, Tier::Dotprod];
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+const TIER_NAMES: &[Tier] = &[Tier::Scalar];
 
 /// `128 · Σ_q w` per row — exactly what `LinearLayer::quantize` stores for tier v4.
 fn row_corr(w: &[i8], m: usize, n: usize) -> Vec<i32> {
@@ -114,7 +141,7 @@ fn sdot_matches_scalar() {
     let mut reference = vec![0.0f32; ROWS];
     scalar::dense_q8(&mut reference, &w, &scale, &corr, M, ROWS, &qx);
     let mut out = vec![0.0f32; ROWS];
-    unsafe { crate::simd::aarch64::dense_q8(&mut out, &w, &scale, &corr, M, ROWS, &qx) };
+    unsafe { crate::simd::aarch64::dotprod::dense_q8(&mut out, &w, &scale, &corr, M, ROWS, &qx) };
     assert_eq!(out, reference, "sdot diverged");
 }
 
@@ -292,4 +319,86 @@ fn block_major_tier_matches_row_major_reference() {
             assert_eq!(b, a, "AVX2 block-major tier diverged for {m}x{n}");
         }
     }
+}
+
+/// The resolver is pure data (no `unsafe`, no kernel call): it must never hand back a
+/// tier the CPU lacks, and a forced tier is capped to the best one a kernel actually
+/// implements. `simd::tier` is the single decision point the CI job relies on.
+#[test]
+fn resolve_never_runs_a_tier_the_runner_lacks() {
+    for &tier in TIER_NAMES {
+        if !tier.is_available() {
+            continue;
+        }
+        let guard = Tier::force(tier);
+        let ran = Tier::resolve(LADDER);
+        drop(guard);
+        assert!(
+            ran.is_available(),
+            "resolve handed back a tier this CPU lacks"
+        );
+        assert!(
+            LADDER.contains(&ran),
+            "resolve returned a tier outside the ladder"
+        );
+        assert!(
+            ran.rank() <= tier.rank(),
+            "resolve ran a tier above the forced one"
+        );
+    }
+}
+
+/// A kernel with no v2 form must fall back to its v1 kernel when v2 is forced, and
+/// forcing `scalar` must actually run the portable reference.
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn a_forced_tier_is_capped_to_the_kernel_that_has_it() {
+    use crate::simd::x86_64::select::{AVX2_ONLY_LADDER, INT8_LADDER};
+
+    let guard = Tier::force(Tier::Scalar);
+    assert_eq!(Tier::resolve(INT8_LADDER), Tier::Scalar);
+    assert_eq!(Tier::resolve(AVX2_ONLY_LADDER), Tier::Scalar);
+    drop(guard);
+
+    if Tier::Sse41.is_available() {
+        let guard = Tier::force(Tier::Sse41);
+        assert_eq!(Tier::resolve(INT8_LADDER), Tier::Sse41);
+        assert_eq!(
+            Tier::resolve(AVX2_ONLY_LADDER),
+            Tier::Scalar,
+            "no v2 kernel"
+        );
+        drop(guard);
+    }
+    if Tier::Avx2.is_available() {
+        let guard = Tier::force(Tier::Avx2);
+        assert_eq!(Tier::resolve(INT8_LADDER), Tier::Avx2);
+        assert_eq!(Tier::resolve(AVX2_ONLY_LADDER), Tier::Avx2);
+        drop(guard);
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn a_forced_tier_is_capped_to_the_kernel_that_has_it() {
+    use crate::simd::aarch64::select::LADDER;
+
+    let guard = Tier::force(Tier::Scalar);
+    assert_eq!(Tier::resolve(LADDER), Tier::Scalar);
+    drop(guard);
+
+    if Tier::Dotprod.is_available() {
+        let guard = Tier::force(Tier::Dotprod);
+        assert_eq!(Tier::resolve(LADDER), Tier::Dotprod);
+        drop(guard);
+    }
+}
+
+#[test]
+fn tier_names_are_the_ci_interface() {
+    // `RNNOISE_SIMD_TIER` is parsed from the same strings the coverage table prints.
+    for &tier in TIER_NAMES {
+        assert_eq!(Tier::parse(tier.name()), Some(tier), "name/parse mismatch");
+    }
+    assert_eq!(Tier::parse("nonsense"), None);
 }

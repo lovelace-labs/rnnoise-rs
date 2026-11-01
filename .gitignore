@@ -1,7 +1,9 @@
 /target
-Cargo.lock
 .DS_Store
 **/.DS_Store
 /bup
 *.o
 weights_blob.bin
+
+# CI oracle outputs (scripts/c_reference.sh)
+/.c_reference

@@ -1,9 +1,15 @@
 //! FFT tests: the plan against a naive DFT, and every vector tier against the
 //! portable reference. A tier whose CPU feature is not present is skipped.
+//!
+//! SAFETY: the test calls the vector tier directly (no runtime detection) to prove it is
+//! bit-identical to the portable reference; the `#[target_feature]` guard is the caller's,
+//! and the call below is gated by `is_x86_feature_detected!("sse2")`. In this island unsafe
+//! cannot be avoided — a `#[target_feature]` function is unsafe by language rule.
 
 // Index loops here mirror the C reference.
 #![allow(clippy::needless_range_loop)]
 use crate::fft::kiss_fft::KissFft;
+#[cfg(target_arch = "x86_64")]
 use crate::fft::scalar;
 use crate::fft::Cpx;
 

@@ -234,6 +234,17 @@ docker-compose*.yml text eol=lf
 
 
 # =============================================================================
+# Binary Files - Test data
+# =============================================================================
+#
+# The parity goldens are raw 16-bit PCM: a line-ending conversion here changes a
+# sample, which is exactly what the parity harness measures.
+
+*.raw            binary
+*.rnn            binary
+test_data/**     -text
+models/*.bin     -text
+# =============================================================================
 # Git LFS (Large File Storage)
 # =============================================================================
 #

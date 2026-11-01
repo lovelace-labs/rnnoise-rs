@@ -32,6 +32,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A sparse weight index that is complete and ascending (the shipped GRU matrices) is loaded
   in dense form at parse time; the accumulation order, and therefore the output, is
   unchanged.
+- CI: the job matrix covers Linux x86-64 and aarch64, macOS and Windows, debug and release;
+  the pinned C reference is built from source (`scripts/c_reference.sh`, scalar path) and
+  compared with committed goldens over a clip set (`tests/c_reference_parity.rs`,
+  `test_data/clips/`, `test_data/goldens/`); each SIMD tier the runner has is exercised
+  end to end (`src/simd/coverage.rs`, `RNNOISE_SIMD_TIER`); criterion benchmarks per tier
+  are uploaded as artifacts; `cargo deny` and cspell are part of the gate. `Cargo.lock` is
+  committed so `cargo deny` checks a reproducible graph.
+- `simd-tier-override`: an opt-in, dev/CI-only feature that honours `RNNOISE_SIMD_TIER` in a
+  normal build, so one kernel path can be measured against another. Zero cost when off.
 
 ### Changed
 

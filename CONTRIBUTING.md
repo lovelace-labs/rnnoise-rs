@@ -29,7 +29,7 @@ workflow used across all `lovelace-labs/*-rs` repos.
 ```bash
 make build       # cargo build
 make test        # cargo test
-make check       # fmt-check + clippy + test (the CI gate)
+make check       # fmt-check + clippy + test + cargo-deny (the CI gate)
 ```
 
 Run `make help` for the full list of targets.
@@ -70,6 +70,22 @@ Types: `feat`, `fix`, `docs`, `style`, `refactor`, `test`, `chore`.
 4. Address review feedback by pushing additional commits.
 5. Squash and merge after approval.
 
+## CI
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs five jobs:
+
+| job | what it checks |
+|---|---|
+| `lint` | `cargo fmt --check`, clippy `-D warnings`, `cargo deny check`, and cspell |
+| `test` | the suite on ubuntu x86-64, ubuntu-arm aarch64, macOS (Apple Silicon) and Windows, debug and release |
+| `simd` | each kernel path, forced with `RNNOISE_SIMD_TIER`, over the tiers the runner has |
+| `c-reference` | the pinned scalar C reference built in CI and compared with the committed goldens |
+| `bench` | criterion per architecture **and per tier** (`simd-tier-override` feature + `RNNOISE_SIMD_TIER`), JSON results uploaded as artifacts |
+
+`simd` requests only tiers its runners actually have: requesting a tier the CPU lacks is a
+failure, not a skip, because CI promised that coverage. `c-reference` and the parity test
+skip gracefully when the toolchain, the network or the clips are absent.
+
 ## Coding standards
 
 - Run `cargo fmt` (enforced by CI).
@@ -83,7 +99,8 @@ Types: `feat`, `fix`, `docs`, `style`, `refactor`, `test`, `chore`.
   `src/fft/x86_64.rs`, `src/fft/dispatch.rs`), each with a `SAFETY:` justification.
 - No `catch_unwind`, no threads, no unstable features, no async in the DSP path, nothing
   before `main()`, no `rustfmt::skip` except manual alignment.
-- The gate is `make check`.
+- The gate is `make check`: `fmt-check`, `clippy`, `spell`, `test`, `deny`.
+  `spell` runs cspell.
 
 ## Module organization
 

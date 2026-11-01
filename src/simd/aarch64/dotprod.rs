@@ -2,6 +2,9 @@
 //! runtime by [`super::select`]; the rest of the crate is compiled for the plain
 //! baseline, so enabling `dotprod` here does not force codegen anywhere else.
 
+// Index loops here mirror the C reference.
+#![allow(clippy::needless_range_loop)]
+
 use core::arch::aarch64::*;
 
 /// Single `sdot` (signed int8 dot-product, 4 MACs per lane) via inline asm — the

@@ -4,13 +4,20 @@ on:
   push:
     branches: [main, dev]
   pull_request:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
-    name: build / test / lint
+  # fmt + clippy + cspell + cargo-deny + the review rules no lint can express.
+  lint:
+    name: lint (fmt, clippy, spell, deny)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -18,13 +25,169 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Format
-        run: cargo fmt --all -- --check
-      - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
-      - name: Build
-        run: cargo build --all-features --verbose
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Spell check
+        run: |
+          npx --yes cspell@latest --no-progress --config cspell.json \
+            "src/**/*.rs" "tests/**/*.rs" "benches/**/*.rs" "doc/**/*.md" "scripts/*.sh" \
+            "examples/**/*.rs" "include/**/*.h" "Makefile" "README.md" "BENCHMARKS.md" \
+            "CHANGELOG.md" "CONTRIBUTING.md" "AGENTS.md" "SECURITY.md"
+      - run: cargo install cargo-deny --locked
+      - run: cargo deny check
+
+  # Every runner the crate claims to support. `simd::coverage` prints the tier table on
+  # each of them, so the log states which kernels actually ran.
+  test:
+    name: test (${{ matrix.runner }} / ${{ matrix.profile }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+        profile: [debug, release]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Which SIMD tiers this runner can exercise
+        # A green run on a runner is not coverage of a tier it cannot execute; say what
+        # this machine has, and let the tests report what they actually exercised.
+        # `shell: bash` because the default shell on Windows is PowerShell, and
+        # /proc/cpuinfo does not exist there — the step reports, it does not decide.
+        shell: bash
+        run: |
+          echo "cpu: $(uname -m || echo unknown)"
+          flags=$( { grep -m1 'flags' /proc/cpuinfo || true; } 2>/dev/null)
+          echo "tiers exercisable: $(printf '%s\n' "$flags" | tr ' ' '\n' | grep -E '^(sse4_1|avx2|avx512f|avx512_bw|avx512bw|avx512_vnni|avx512vnni|dotprod)$' | tr '\n' ' ' || true)"
+      - run: cargo build --all-features --verbose
       - name: Test
-        run: cargo test --all-features --verbose
-      - name: Test (release / parity)
-        run: cargo test --release --verbose
+        run: cargo test --all-features ${{ matrix.profile == 'release' && '--release' || '' }} -- --nocapture
+
+  # Each SIMD path the runner can actually execute. `simd::coverage` fails rather than
+  # skipping when a tier is requested on hardware without the ISA, so the matrix lists
+  # only tiers these runners have. Tier v4 needs an AVX-512F + AVX512BW + VNNI CPU, which
+  # is the job below.
+  simd:
+    name: simd coverage (${{ matrix.runner }} / ${{ matrix.tier }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            tier: scalar
+          - runner: ubuntu-latest
+            tier: sse4.1
+          - runner: ubuntu-latest
+            tier: avx2
+          # Tier v4 runs here: the current ubuntu-latest hardware is Zen 4 (this run's
+          # coverage table shows `vnni` exercised, not skipped). If a runner ever lacks
+          # AVX512F+BW+VNNI this entry fails instead of skipping — that is the point,
+          # a requested tier that cannot run is uncovered coverage.
+          - runner: ubuntu-latest
+            tier: vnni
+          - runner: ubuntu-24.04-arm
+            tier: scalar
+          - runner: ubuntu-24.04-arm
+            tier: dotprod
+    env:
+      RNNOISE_SIMD_TIER: ${{ matrix.tier }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --all-features --lib -- --nocapture
+
+  # Tier v4 cannot be forced on hardware that lacks the ISA (illegal instruction), so it
+  # is only real coverage on an AVX-512 machine. Runs when the repository variable
+  # `avx512_runner` holds a runner label; otherwise the job is skipped rather than queued
+  # forever, and the pure-Rust VNNI identity test in `simd/tests.rs` is the fallback.
+  simd-tier-coverage:
+    name: tier v4 exercised on real AVX-512 hardware
+    if: ${{ vars.avx512_runner != '' }}
+    runs-on: ${{ vars.avx512_runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Fail loudly if this runner is not AVX-512 + VNNI
+        run: |
+          flags=$(grep -m1 'flags' /proc/cpuinfo)
+          for f in avx512f avx512_bw avx512bw avx512_vnni; do
+            grep -q " $f" <<<"$flags" || { echo "runner has no $f — tier v4 cannot be exercised here"; exit 1; }
+          done
+          echo "exercising tier v4 on: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2)"
+      - name: Test (tier equality, all tiers must run)
+        run: |
+          set -o pipefail
+          cargo test --all-features -- --nocapture 2>&1 | tee coverage.log
+          grep -q 'x86-64 tier coverage: every tier ran here' coverage.log || {
+            echo 'tier v4 did not run on this runner — the gate needs an AVX-512 + VNNI CPU'
+            exit 1
+          }
+
+  # The oracle: build the pinned Xiph C reference in the pure-C (`_c`) path and compare
+  # its output with the committed goldens on each architecture, so a golden stays
+  # reproducible from upstream sources and not from one machine's compiler.
+  c-reference:
+    name: C reference parity (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Cache the pinned upstream sources and model
+        uses: actions/cache@v4
+        with:
+          path: bup
+          key: rnnoise-ref-${{ matrix.runner }}-${{ hashFiles('scripts/c_reference.sh') }}
+      - name: Build the scalar oracle and run the clips
+        run: ./scripts/c_reference.sh
+      - name: Parity against the oracle
+        run: cargo test --all-features --test c_reference_parity -- --nocapture
+        env:
+          RNNOISE_C_REFERENCE_DIR: ${{ github.workspace }}/.c_reference
+
+  # Criterion numbers per architecture and per tier, uploaded as artifacts. Numbers are
+  # comparable within one runner only, so the artifact name carries both the machine and
+  # the tier; `simd-tier-override` (opt-in, dev/CI) makes `RNNOISE_SIMD_TIER` apply in a
+  # bench build, which is how one path is measured against another on the same machine.
+  bench:
+    name: benchmarks (${{ matrix.runner }} / ${{ matrix.tier }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            tier: detected
+          - runner: ubuntu-latest
+            tier: avx2
+          - runner: ubuntu-latest
+            tier: scalar
+          - runner: ubuntu-24.04-arm
+            tier: detected
+          - runner: ubuntu-24.04-arm
+            tier: dotprod
+          - runner: macos-latest
+            tier: detected
+    env:
+      RNNOISE_SIMD_TIER: ${{ matrix.tier == 'detected' && '' || matrix.tier }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Bench
+        run: cargo bench --all-features --bench process -- --save-baseline ci
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ matrix.runner }}-${{ matrix.tier }}
+          path: target/criterion
+          retention-days: 14

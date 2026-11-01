@@ -29,15 +29,48 @@ Reproducible benchmarks comparing:
 Two complementary measurements:
 
 1. **Per-frame compute (in-process).** Each implementation processes the *same*
-   480-sample frame in a tight loop (20 000 iters after 200 warm-up), so the
-   number is pure steady-state compute, excluding process start-up and I/O. An
-   **active** frame (tone + noise) keeps the NN running; a **silent** frame makes
-   RNNoise skip the network, so `full − front-end ≈ NN cost`.
+   480-sample frame, so the number is pure steady-state compute, excluding process
+   start-up and I/O. An **active** frame (tone + noise) keeps the NN running; a
+   **silent** frame makes RNNoise skip the network, so `full − front-end ≈ NN cost`.
+   The tables below were produced by the tight-loop harness (20 000 iters after 200
+   warm-up); `cargo bench` now measures the same ablation through criterion — see
+   "How `cargo bench` produces the numbers".
 2. **End-to-end CLI wall-clock.** Each tool denoises the same 100 s RAW file;
    we report the **min of 7 runs** (and derive µs/frame and the real-time factor).
    This includes start-up + I/O (small at this length).
 
 All four read/write the same RAW 16-bit 48 kHz mono format.
+
+## How `cargo bench` produces the numbers
+
+`benches/process.rs` is a criterion harness (dev-dependency, `harness = false`): one
+group per implementation — `float`, `int8`, `legacy` — each with an **active** input (tone
++ noise, so the network runs on every frame) and a **silent** input (front-end only,
+network skipped), i.e. the same `full − front-end ≈ NN cost` ablation the tables use.
+
+`make bench` saves a baseline; the CI `bench` job runs
+`cargo bench --all-features -- --save-baseline ci` on x86-64, aarch64 and Apple Silicon
+and uploads `target/criterion` as `bench-<runner>`. Compare numbers **within** an
+artifact, never across runners — they are different machines. Each run prints the tier
+runtime detection selected, so a result is attributable to a kernel path
+(`RNNOISE_SIMD_TIER` is a test-only override and does not apply to benches).
+
+Current run on an x86-64 CI-shape box (tier v3 AVX2, 100 samples), to show what the
+artifacts look like — not the Apple M4 Pro reference numbers above:
+
+| group | active frame | silent frame | NN | NN % | real time |
+|---|--:|--:|--:|--:|--:|
+| `float` | 181.9 µs | 24.8 µs | 157.1 µs | 86 % | 55× |
+| `int8` | 106.0 µs | 24.6 µs | 81.4 µs | 77 % | 94× |
+| `legacy` | 35.9 µs | 21.4 µs | 14.5 µs | 40 % | 279× |
+
+Real time = 10 ms (one 480-sample frame at 48 kHz) divided by the active-frame time.
+
+Why the per-tier matrix matters: on the same box, `RNNOISE_SIMD_TIER=scalar` (with
+`simd-tier-override`) gives **787 µs/frame** for the float path against **181.9 µs** at
+tier v3 — a 4.3× difference that a single benchmark run would hide. The CI `bench` job
+therefore runs `detected`, `avx2` and `scalar` on x86-64 and `detected` and `dotprod` on
+aarch64, each uploaded as its own artifact.
 
 ## Results — per-frame compute (in-process)
 
@@ -194,7 +227,7 @@ core); its tier v3 row (77.5 / 98.5) is genuine. Tier v4 was never slower than t
 
 The shape change is worth 1.16× end to end, not the 1.37× per row it measures in isolation: the
 isolated kernel keeps 442 KB hot in L2, the model streams 2.8 MB of int8 weights per frame from L3,
-so the crate damps shape ratios. `select` stays top-down.
+so the crate damps shape ratios. `select` stays top-down (`simd::tier::resolve` is the ladder in one place: top-down by default, capped to what a kernel implements when CI forces a tier).
 
 ### 3. f16 weights + f16 SIMD — *medium win (future)*
 

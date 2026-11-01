@@ -26,11 +26,18 @@ capi = []
 # `realfft` (rustfft) for the front-end FFT — the same fast FFT `nnnoiseless`
 # uses — so the legacy model is faster than `nnnoiseless`.
 legacy-model = ["dep:realfft"]
+# Opt-in, dev/CI only: honours `RNNOISE_SIMD_TIER` in a normal build so a specific
+# kernel path can be exercised and measured. Costs one cached lookup per matmul call,
+# so it is never enabled by default and never part of the shipping API.
+simd-tier-override = []
 
 [dependencies]
 realfft = { version = "3", optional = true }
 
 [dev-dependencies]
+# Benchmark harness for `cargo bench`: the CI job saves a baseline and
+# uploads the JSON as an artifact. Dev-only, so it never reaches a crate user.
+criterion = "0.5"
 
 [[bin]]
 name = "rnnoise-demo"
