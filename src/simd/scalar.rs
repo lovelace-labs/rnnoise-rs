@@ -1,6 +1,8 @@
 //! Portable reference kernels. These are the definitions the SIMD tiers must match
 //! bit for bit, and they are what runs on targets without a detected SIMD path.
 
+// These lints flag the arithmetic itself, which mirrors the C reference.
+#![allow(clippy::needless_range_loop)]
 pub(crate) fn i8_dot(w: &[i8], x: &[i8]) -> i32 {
     let mut acc = 0i32;
     for (&wv, &xv) in w.iter().zip(x) {

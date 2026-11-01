@@ -24,7 +24,7 @@ fmt-check: ## cargo fmt --check
 	cargo fmt --all --check
 
 clippy: ## cargo clippy with warnings denied
-	cargo clippy --all-targets -- -D warnings
+	cargo clippy --all-targets --all-features -- -D warnings
 
 doc: ## cargo doc
 	cargo doc --no-deps

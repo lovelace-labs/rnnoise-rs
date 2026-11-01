@@ -71,7 +71,7 @@ fn quantized_accuracy() {
     let input = load_i16(include_bytes!("../test_data/testing.raw"));
     let reference = load_i16(include_bytes!("../test_data/ref_out.raw"));
     let model = Arc::new(RnnModel::default().quantized());
-    let mut st = DenoiseState::with_model(model);
+    let mut st = DenoiseState::new_with_model(model);
     let mut out_buf = [0.0f32; FRAME_SIZE];
     let mut output: Vec<f32> = Vec::new();
     let mut first = true;

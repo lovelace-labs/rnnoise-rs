@@ -1,6 +1,9 @@
 //! Tier-vs-reference equality. A tier whose CPU feature is not present is skipped,
 //! so these run anywhere (and in CI on whatever the runner happens to be).
 
+// SAFETY: these tests call each tier directly (no runtime detection) to prove it is
+// bit-identical to the portable reference; the target_feature guard is the caller's.
+
 use crate::simd::scalar;
 
 const M: usize = 384; // a real layer width (conv2 / GRU)

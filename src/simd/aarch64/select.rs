@@ -1,4 +1,8 @@
 //! Runtime `dotprod` detection; the portable reference is the fallback.
+//!
+//! SAFETY: the `sdot` kernels are only reached after `is_aarch64_feature_detected!`
+//! confirms `dotprod`. A `#[target_feature]` function is unsafe by language rule;
+//! there is no safe equivalent.
 
 use crate::simd::{aarch64, scalar};
 

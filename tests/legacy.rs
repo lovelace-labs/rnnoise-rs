@@ -31,7 +31,7 @@ fn legacy_matches_old_model() {
         }
         first = false;
     }
-    assert_eq!(output.len(), reference.len());
+    assert_eq!(output.len(), reference.len(), "output length mismatch");
 
     let out_i16: Vec<i16> = output.iter().map(|&x| x as i16).collect();
     let mut ss_ref = 0.0f64;

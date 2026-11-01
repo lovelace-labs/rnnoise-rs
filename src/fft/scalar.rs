@@ -2,7 +2,7 @@
 //! sequence as `rnn_fft_impl` in `kiss_fft.c`. This is the definition the vector tiers
 //! in [`crate::fft::x86_64`] must match bit for bit.
 
-use crate::fft::plan::Stage;
+use crate::fft::kiss_fft::Stage;
 use crate::fft::spectrum::Cpx;
 
 pub(crate) fn process(stages: &[Stage], f: &mut [Cpx]) {

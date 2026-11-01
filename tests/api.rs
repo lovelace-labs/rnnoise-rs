@@ -46,12 +46,12 @@ fn deterministic_across_instances() {
 }
 
 #[test]
-fn with_model_matches_default() {
+fn new_with_model_matches_default() {
     // A shared Arc<RnnModel> must behave exactly like the built-in default.
     let frames = noisy_frames(20);
     let default_out = run(DenoiseState::new(), &frames);
     let model = Arc::new(RnnModel::default());
-    let custom_out = run(DenoiseState::with_model(model), &frames);
+    let custom_out = run(DenoiseState::new_with_model(model), &frames);
     assert_eq!(default_out, custom_out);
 }
 
@@ -63,7 +63,10 @@ fn silence_is_stable() {
     let mut out = [0.0f32; FRAME_SIZE];
     for _ in 0..50 {
         let vad = st.process_frame(&mut out, &zero);
-        assert!(vad.is_finite());
+        assert!(
+            vad.is_finite(),
+            "VAD probability must be finite for finite input"
+        );
     }
     let peak = out.iter().fold(0.0f32, |m, &x| m.max(x.abs()));
     assert!(peak < 1.0, "silence produced non-trivial output: {peak}");
@@ -87,5 +90,8 @@ fn rejects_garbage_blob() {
 fn output_finite() {
     let frames = noisy_frames(40);
     let out = run(DenoiseState::new(), &frames);
-    assert!(out.iter().all(|x| x.is_finite()));
+    assert!(
+        out.iter().all(|x| x.is_finite()),
+        "output samples must stay finite"
+    );
 }

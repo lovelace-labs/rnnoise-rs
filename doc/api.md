@@ -33,14 +33,16 @@ same stream.
 
 ```rust
 let mut st = DenoiseState::new();              // built-in model
-// or: DenoiseState::with_model(model)         // a shared Arc<RnnModel>
+// or: DenoiseState::new_with_model(model)      // a shared Arc<RnnModel>
 
 let vad: f32 = st.process_frame(&mut out, &inp); // out,inp: &[f32] ≥ FRAME_SIZE
 ```
 
 - `new()` / `Default` — use the embedded default model (shared across instances;
   parsed once).
-- `with_model(model: Arc<RnnModel>)` — back the denoiser with a specific model.
+- `new_with_model(model: Arc<RnnModel>)` — back the denoiser with a specific model.
+  (`with_model()` is the old name, kept as a deprecated alias: `with_foo()` is reserved
+  for closure accessors.)
 - `process_frame(&mut self, output, input) -> f32` — denoise one frame; returns
   the voice-activity probability in `[0, 1]`. `output` and `input` must each be at
   least `FRAME_SIZE` long (longer slices: only the first `FRAME_SIZE` are used).
@@ -94,8 +96,8 @@ let fast  = RnnModel::default().quantized();           // int8 variant (see belo
 ```rust
 use std::sync::Arc;
 let model = Arc::new(RnnModel::default().quantized());
-let mut a = DenoiseState::with_model(model.clone());
-let mut b = DenoiseState::with_model(model);  // shares the same weights, no copy
+let mut a = DenoiseState::new_with_model(model.clone());
+let mut b = DenoiseState::new_with_model(model);  // shares the same weights, no copy
 ```
 
 This is the recommended pattern for many concurrent streams: the weights are
@@ -139,7 +141,7 @@ let mut st = DenoiseStateV1::new();                 // embedded legacy weights
 let v = st.process_frame(&mut out, &inp);
 
 let model = std::sync::Arc::new(RnnModelV1::from_bytes(&blob)?); // custom legacy weights
-let mut st = DenoiseStateV1::with_model(model);
+let mut st = DenoiseStateV1::new_with_model(model);
 # Ok::<(), rnnoise::ModelError>(()) }
 ```
 

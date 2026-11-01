@@ -11,6 +11,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The minimum supported Rust version is now **1.89** (was 1.85): the AVX-512 VNNI tier uses
   AVX-512 intrinsics and the `avx512f` target feature, which are stable from 1.89. AVX-512 is
   still only *used* when CPUID reports it.
+- `ModelError` is `#[non_exhaustive]`, so an exhaustive `match` on it needs a wildcard arm.
+  This lets later releases add error variants without another break.
 
 ### Added
 
@@ -30,6 +32,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A sparse weight index that is complete and ascending (the shipped GRU matrices) is loaded
   in dense form at parse time; the accumulation order, and therefore the output, is
   unchanged.
+
+### Changed
+
+- Constructors follow the `new_with_foo()` form: `DenoiseState::new_with_model()` and
+  `DenoiseStateV1::new_with_model()`. The old `with_model` names remain as deprecated
+  aliases.
+- The model-geometry constants live in a `params` module and are re-exported from the crate
+  root, so `rnnoise::FRAME_SIZE` and friends keep their paths. No `unwrap()` is left in
+  `src/`. `tests/api_surface.rs` names every exported item, so a public rename is a compile
+  failure.
 
 ## [0.1.0]
 

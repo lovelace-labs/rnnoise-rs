@@ -92,13 +92,13 @@ fn main() {
     let q = Arc::new(RnnModel::default().quantized());
     let qfull = bench_with(
         "  full (active)",
-        DenoiseState::with_model(q.clone()),
+        DenoiseState::new_with_model(q.clone()),
         &active,
         iters,
     );
     let qfront = bench_with(
         "  front-end (silent)",
-        DenoiseState::with_model(q),
+        DenoiseState::new_with_model(q),
         &silent,
         iters,
     );

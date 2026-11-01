@@ -5,6 +5,8 @@
 //! `kf_factor`, the twiddles are generated in double precision exactly as the C
 //! generator does, and the transform is the scaled DFT that `rnn_fft_c` produces.
 
+// Index loops here mirror the C reference.
+#![allow(clippy::needless_range_loop)]
 use crate::fft::dispatch;
 use crate::fft::spectrum::Cpx;
 

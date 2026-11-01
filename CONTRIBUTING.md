@@ -75,8 +75,15 @@ Types: `feat`, `fix`, `docs`, `style`, `refactor`, `test`, `chore`.
 - Run `cargo fmt` (enforced by CI).
 - All clippy warnings are errors (`-D warnings`).
 - Document public items with `///` comments.
-- Prefer `Result` over panics for recoverable errors.
-- `#![forbid(unsafe_code)]` where it is set — keep the crate unsafe-free.
+- Prefer `Result` over panics for recoverable errors; `Option` for obvious
+  failures; `panic!` only for violated invariants.
+- No `unwrap` in `src/` — pattern-match when the input proves the case, otherwise
+  `expect("context")`. Tests use `expect` with an assertion context string.
+- Unsafe only in the declared islands (`src/capi.rs`, `src/simd/`,
+  `src/fft/x86_64.rs`, `src/fft/dispatch.rs`), each with a `SAFETY:` justification.
+- No `catch_unwind`, no threads, no unstable features, no async in the DSP path, nothing
+  before `main()`, no `rustfmt::skip` except manual alignment.
+- The gate is `make check`.
 
 ## Module organization
 

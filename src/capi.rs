@@ -8,7 +8,8 @@
 use std::os::raw::{c_char, c_float, c_int, c_void};
 use std::sync::Arc;
 
-use crate::{DenoiseState, RnnModel, FRAME_SIZE};
+use crate::params::FRAME_SIZE;
+use crate::{DenoiseState, RnnModel};
 
 /// Opaque model handle (`RNNModel`).
 pub struct RNNModel(Arc<RnnModel>);
@@ -28,7 +29,7 @@ pub unsafe extern "C" fn rnnoise_create(model: *const RNNModel) -> *mut DenoiseS
     let st = if model.is_null() {
         DenoiseState::new()
     } else {
-        DenoiseState::with_model((*model).0.clone())
+        DenoiseState::new_with_model((*model).0.clone())
     };
     Box::into_raw(Box::new(st))
 }

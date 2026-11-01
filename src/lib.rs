@@ -20,25 +20,19 @@
 //! Sample amplitudes use the same convention as upstream: roughly the range of
 //! 16-bit PCM (i.e. `i16` values cast to `f32`), not `[-1, 1]`.
 
-// `min().max()` mirrors the C `MAX(lo, MIN(hi, x))` clamp ordering exactly, and
-// the full-precision activation/DCT constants are deliberately the nearest f32;
-// both are kept for bit-level parity with the reference.
-#![allow(
-    clippy::needless_range_loop,
-    clippy::manual_clamp,
-    clippy::excessive_precision
-)]
-
 mod celt_lpc;
 mod common;
 mod denoise;
 mod fft;
 mod nnet;
+mod params;
 mod pitch;
+#[allow(unsafe_code)] // unsafe island: core::arch intrinsics are unsafe functions
 mod simd;
 mod weights;
 
 #[cfg(feature = "capi")]
+#[allow(unsafe_code)] // unsafe island: pointers cross the FFI boundary
 pub mod capi;
 
 /// The original (2018) RNNoise model — smaller and faster, lower quality.
@@ -47,31 +41,8 @@ pub mod capi;
 pub mod legacy;
 
 pub use denoise::DenoiseState;
+pub use params::{FRAME_SIZE, FREQ_SIZE, NB_BANDS, NB_FEATURES, WINDOW_SIZE};
 pub use weights::{ModelError, RnnModel};
 
 #[cfg(feature = "legacy-model")]
 pub use legacy::{DenoiseStateV1, RnnModelV1};
-
-/// Number of samples consumed/produced per [`DenoiseState::process_frame`] call.
-pub const FRAME_SIZE: usize = 480;
-/// Analysis window length (50% overlap → `2 * FRAME_SIZE`).
-pub const WINDOW_SIZE: usize = 2 * FRAME_SIZE;
-/// Number of FFT bins kept (`FRAME_SIZE + 1`).
-pub const FREQ_SIZE: usize = FRAME_SIZE + 1;
-
-/// Number of perceptual (ERB-like) frequency bands.
-pub const NB_BANDS: usize = 32;
-/// Length of the neural-network feature vector (`2*NB_BANDS + 1`).
-pub const NB_FEATURES: usize = 2 * NB_BANDS + 1;
-
-pub(crate) const PITCH_MIN_PERIOD: usize = 60;
-pub(crate) const PITCH_MAX_PERIOD: usize = 768;
-pub(crate) const PITCH_FRAME_SIZE: usize = 960;
-pub(crate) const PITCH_BUF_SIZE: usize = PITCH_MAX_PERIOD + PITCH_FRAME_SIZE;
-
-/// Band edges in units of FFT bins (50 Hz/bin). Length `NB_BANDS + 2`.
-/// "ERB bandwidths going in reverse from 20 kHz" — see `denoise.c`.
-pub(crate) const EBAND20MS: [usize; NB_BANDS + 2] = [
-    0, 2, 4, 6, 8, 10, 12, 15, 18, 21, 24, 28, 32, 36, 41, 47, 53, 60, 68, 77, 87, 98, 110, 124,
-    140, 157, 176, 198, 223, 251, 282, 317, 356, 400,
-];

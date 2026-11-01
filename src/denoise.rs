@@ -3,17 +3,19 @@
 //! pitch-comb filtering, gain smoothing and windowed overlap-add synthesis,
 //! with the one-frame look-ahead delay used by upstream.
 
+// These lints flag the arithmetic itself, which mirrors the C reference.
+#![allow(clippy::needless_range_loop, clippy::manual_clamp)]
 use std::sync::{Arc, OnceLock};
 
 use crate::common::{biquad, Common};
 use crate::fft::Cpx;
 use crate::nnet::{compute_rnn, RnnState};
-use crate::pitch::{pitch_downsample, pitch_search, remove_doubling};
-use crate::weights::RnnModel;
-use crate::{
+use crate::params::{
     FRAME_SIZE, FREQ_SIZE, NB_BANDS, NB_FEATURES, PITCH_BUF_SIZE, PITCH_FRAME_SIZE,
     PITCH_MAX_PERIOD, PITCH_MIN_PERIOD, WINDOW_SIZE,
 };
+use crate::pitch::{pitch_downsample, pitch_search, remove_doubling};
+use crate::weights::RnnModel;
 
 fn common() -> &'static Common {
     static COMMON: OnceLock<Common> = OnceLock::new();
@@ -46,12 +48,14 @@ pub struct DenoiseState {
 
 impl DenoiseState {
     /// Create a denoiser using the built-in model (shared across instances).
+    #[must_use]
     pub fn new() -> Self {
-        Self::with_model(default_model())
+        Self::new_with_model(default_model())
     }
 
     /// Create a denoiser backed by a specific (possibly custom) model.
-    pub fn with_model(model: Arc<RnnModel>) -> Self {
+    #[must_use]
+    pub fn new_with_model(model: Arc<RnnModel>) -> Self {
         // Build shared tables eagerly so the first frame isn't penalised.
         let _ = common();
         DenoiseState {
@@ -70,6 +74,14 @@ impl DenoiseState {
             delayed_ep: [0.0; NB_BANDS],
             delayed_exp: [0.0; NB_BANDS],
         }
+    }
+
+    /// Deprecated alias for [`DenoiseState::new_with_model`]. The `with_foo()` form is
+    /// reserved for closure accessors, so constructors are named `new_with_foo()`.
+    #[deprecated(since = "0.2.0", note = "use `new_with_model()`")]
+    #[must_use]
+    pub fn with_model(model: Arc<RnnModel>) -> Self {
+        Self::new_with_model(model)
     }
 
     /// Denoise one frame. `input` and `output` must both be [`FRAME_SIZE`]

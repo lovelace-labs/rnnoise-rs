@@ -12,6 +12,8 @@
 //! within ~1e-5 relative energy (imperceptible; the residual is the activation
 //! quantization in the `sdot` path).
 
+// Index loops here mirror the C reference.
+#![allow(clippy::needless_range_loop)]
 use std::sync::{Arc, OnceLock};
 
 use realfft::num_complex::Complex;
@@ -19,12 +21,12 @@ use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
 
 use crate::common::biquad;
 use crate::fft::Cpx;
-use crate::pitch::{pitch_downsample, pitch_search, remove_doubling};
-use crate::weights::ModelError;
-use crate::{
+use crate::params::{
     FRAME_SIZE, FREQ_SIZE, PITCH_BUF_SIZE, PITCH_FRAME_SIZE, PITCH_MAX_PERIOD, PITCH_MIN_PERIOD,
     WINDOW_SIZE,
 };
+use crate::pitch::{pitch_downsample, pitch_search, remove_doubling};
+use crate::weights::ModelError;
 
 const NB_BANDS: usize = 22;
 const CEPS_MEM: usize = 8;
@@ -140,7 +142,10 @@ fn rfft_forward(
     out: &mut [Cpx; FREQ_SIZE],
     wnorm: f32,
 ) {
-    r2c.process_with_scratch(input, spec, scratch).unwrap();
+    // The transform, the spectrum and the scratch buffer are allocated together in
+    // `LegacyState::new`, so a length mismatch here would be a bug in this crate.
+    r2c.process_with_scratch(input, spec, scratch)
+        .expect("rfft forward transform: plan and scratch buffers are built together");
     for (o, c) in out.iter_mut().zip(spec.iter()) {
         o.r = c.re * wnorm;
         o.i = c.im * wnorm;
@@ -161,7 +166,8 @@ fn rfft_inverse(
     // c2r requires the DC and Nyquist bins to be purely real.
     spec[0].im = 0.0;
     spec[FREQ_SIZE - 1].im = 0.0;
-    c2r.process_with_scratch(spec, out, scratch).unwrap();
+    c2r.process_with_scratch(spec, out, scratch)
+        .expect("rfft inverse transform: plan and scratch buffers are built together");
     for v in out.iter_mut() {
         *v *= 0.5;
     }
@@ -230,7 +236,7 @@ fn sigmoid_approx(x: f32) -> f32 {
     0.5 + 0.5 * tansig_approx(0.5 * x)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Act {
     Tanh,
     Sigmoid,
@@ -258,6 +264,7 @@ impl Act {
 
 // --- network ---------------------------------------------------------------
 
+#[derive(Clone, Debug)]
 struct DenseLayer {
     bias: Vec<i8>,
     weights: Vec<i8>, // [nb_inputs][nb_neurons]
@@ -283,6 +290,7 @@ impl DenseLayer {
     }
 }
 
+#[derive(Clone, Debug)]
 struct GruLayer {
     bias: Vec<i8>, // [3*nb_neurons]
     /// Input weights transposed to `[3*nb_neurons][nb_inputs]` so each output is
@@ -370,6 +378,7 @@ impl GruLayer {
 }
 
 /// The original RNNoise model (dense + 3 GRUs + 2 output heads).
+#[derive(Clone, Debug)]
 pub struct RnnModelV1 {
     input_dense: DenseLayer,
     vad_gru: GruLayer,
@@ -569,7 +578,8 @@ pub struct DenoiseStateV1 {
 
 impl DenoiseStateV1 {
     /// Create a denoiser using a (shared) legacy model.
-    pub fn with_model(model: Arc<RnnModelV1>) -> Self {
+    #[must_use]
+    pub fn new_with_model(model: Arc<RnnModelV1>) -> Self {
         let _ = legacy_common();
         let rnn = RnnStateV1::new(&model);
         let mut planner = RealFftPlanner::<f32>::new();
@@ -600,6 +610,14 @@ impl DenoiseStateV1 {
         }
     }
 
+    /// Deprecated alias for [`DenoiseStateV1::new_with_model`] (`with_foo()` is
+    /// reserved for closure accessors).
+    #[deprecated(since = "0.2.0", note = "use `new_with_model()`")]
+    #[must_use]
+    pub fn with_model(model: Arc<RnnModelV1>) -> Self {
+        Self::new_with_model(model)
+    }
+
     /// Create a denoiser using the built-in legacy model.
     #[cfg(feature = "legacy-model")]
     pub fn new() -> Self {
@@ -607,7 +625,7 @@ impl DenoiseStateV1 {
         let m = MODEL
             .get_or_init(|| Arc::new(RnnModelV1::default()))
             .clone();
-        Self::with_model(m)
+        Self::new_with_model(m)
     }
 
     /// Denoise one [`FRAME_SIZE`]-sample frame; returns the VAD probability.

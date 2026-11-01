@@ -2,8 +2,10 @@
 //! LPC whitening, coarse/fine cross-correlation search, and pitch-doubling
 //! removal.
 
+// These lints flag the arithmetic itself, which mirrors the C reference.
+#![allow(clippy::needless_range_loop)]
 use crate::celt_lpc::{autocorr, dual_inner_prod, fir5, inner_prod, lpc, pitch_xcorr};
-use crate::{PITCH_FRAME_SIZE, PITCH_MAX_PERIOD};
+use crate::params::{PITCH_FRAME_SIZE, PITCH_MAX_PERIOD};
 
 /// `rnn_pitch_downsample` for a single channel: 2× decimate `x` (length `len`)
 /// into `x_lp` (length `len/2`), then apply a short LPC whitening filter.

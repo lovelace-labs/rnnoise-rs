@@ -7,6 +7,8 @@
 //! [`crate::simd::scalar::dense_sgemv_blocks`] (and hence to the row-major reference on the
 //! same values). Measured on a Zen 3 core: 384×1152 goes from ~20.7 to ~15.3 µs per call.
 
+// These lints flag the arithmetic itself, which mirrors the C reference.
+#![allow(clippy::needless_range_loop)]
 use core::arch::x86_64::*;
 
 /// Groups accumulated in parallel, one `ymm` register each.

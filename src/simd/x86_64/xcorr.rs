@@ -6,6 +6,8 @@
 //! exactly the same bits as the portable reference in [`crate::simd::scalar`]: the
 //! lanes are independent chains and nothing is reassociated.
 
+// Index loops here mirror the C reference.
+#![allow(clippy::needless_range_loop)]
 use core::arch::x86_64::*;
 
 use crate::simd::scalar;

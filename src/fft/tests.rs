@@ -1,7 +1,11 @@
 //! FFT tests: the plan against a naive DFT, and every vector tier against the
 //! portable reference. A tier whose CPU feature is not present is skipped.
 
-use crate::fft::{plan::KissFft, scalar, spectrum::Cpx};
+// Index loops here mirror the C reference.
+#![allow(clippy::needless_range_loop)]
+use crate::fft::kiss_fft::KissFft;
+use crate::fft::scalar;
+use crate::fft::Cpx;
 
 fn seed_input(seed: u32, n: usize) -> Vec<Cpx> {
     let mut s = seed;

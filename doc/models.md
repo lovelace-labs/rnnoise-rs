@@ -91,7 +91,7 @@ use rnnoise::{DenoiseState, RnnModel};
 
 let blob = std::fs::read("weights_blob.bin")?;     // upstream "DNNw" export
 let model = Arc::new(RnnModel::from_bytes(&blob)?);
-let mut st = DenoiseState::with_model(model);
+let mut st = DenoiseState::new_with_model(model);
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
@@ -108,7 +108,7 @@ output heads stay float, mirroring upstream's choice):
 ```rust
 use std::sync::Arc;
 let model = Arc::new(rnnoise::RnnModel::default().quantized());
-let mut st = rnnoise::DenoiseState::with_model(model);
+let mut st = rnnoise::DenoiseState::new_with_model(model);
 ```
 
 - **Layout:** each quantized layer becomes a transposed, dense `[output][input]`

@@ -2,6 +2,12 @@
 //! (scalar `_c` path, float weights). Covers the dense/sparse affine transform,
 //! Conv1D, GRU, and the tanh/sigmoid rational-polynomial approximations.
 
+// These lints flag the arithmetic itself, which mirrors the C reference.
+#![allow(
+    clippy::excessive_precision,
+    clippy::manual_clamp,
+    clippy::needless_range_loop
+)]
 /// Activation kinds used by the RNNoise model.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Activation {
@@ -64,6 +70,7 @@ const MAX_GRU_3N: usize = 1152;
 /// opt-in int8 quantization. The int8 form is a **transposed, dense**
 /// `[output][input]` matrix with a per-output scale, which lets each output be a
 /// contiguous int8 dot product — ideal for the SIMD path in [`crate::simd`].
+#[derive(Clone, Debug)]
 pub(crate) enum Weights {
     Float(Vec<f32>),
     Q8 { w: Vec<i8>, scale: Vec<f32> },
@@ -84,6 +91,7 @@ pub(crate) enum DenseLayout {
 
 /// Generic (sparse) affine transform — port of `LinearLayer` + `compute_linear`.
 /// Always carries a bias for the RNNoise model.
+#[derive(Clone, Debug)]
 pub(crate) struct LinearLayer {
     pub bias: Vec<f32>,
     pub weights: Weights,
@@ -389,8 +397,11 @@ mod tests {
 
     #[test]
     fn activations_bounds() {
-        assert!((tanh_approx(0.0)).abs() < 1e-6);
-        assert!((sigmoid_approx(0.0) - 0.5).abs() < 1e-6);
+        assert!((tanh_approx(0.0)).abs() < 1e-6, "tanh_approx(0) must be 0");
+        assert!(
+            (sigmoid_approx(0.0) - 0.5).abs() < 1e-6,
+            "sigmoid_approx(0) must be 0.5"
+        );
         assert!(tanh_approx(100.0) <= 1.0 && tanh_approx(100.0) > 0.999);
         assert!(tanh_approx(-100.0) >= -1.0 && tanh_approx(-100.0) < -0.999);
     }

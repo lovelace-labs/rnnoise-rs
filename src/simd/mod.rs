@@ -18,11 +18,16 @@
 mod dispatch;
 mod scalar;
 
+// Unsafe island; the glob import is because `core::arch` intrinsics cannot be
+// imported one by one.
+#[allow(unsafe_code, clippy::wildcard_imports)]
 #[cfg(target_arch = "aarch64")]
 mod aarch64;
+#[allow(unsafe_code, clippy::wildcard_imports)]
 #[cfg(target_arch = "x86_64")]
 mod x86_64;
 
+#[allow(unsafe_code, clippy::wildcard_imports)] // unsafe island + glob exemption
 #[cfg(test)]
 mod tests;
 

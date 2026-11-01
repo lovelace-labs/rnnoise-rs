@@ -13,7 +13,9 @@
 
 use core::arch::x86_64::*;
 
-use crate::fft::{plan::Stage, scalar, spectrum::Cpx};
+use crate::fft::kiss_fft::Stage;
+use crate::fft::scalar;
+use crate::fft::Cpx;
 
 /// Four `Cpx` values as a real vector and an imaginary vector.
 type Pairs = (__m128, __m128);

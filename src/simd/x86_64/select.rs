@@ -3,6 +3,10 @@
 //! `x86-64` baseline, and the same binary runs tier v4 on a Zen 4 server and
 //! tier v1 on an old Core 2. `#[target_feature]` is applied to the kernel
 //! functions only, so it never changes codegen anywhere else.
+//!
+//! SAFETY: every kernel call below is gated by a runtime feature detection for the
+//! exact ISA that kernel requires, so no tier runs on a CPU that lacks it. Safe code
+//! cannot express this: a `#[target_feature]` function is unsafe by language rule.
 
 use crate::simd::{scalar, x86_64};
 
