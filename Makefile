@@ -6,7 +6,7 @@
 
 VERSION := $(shell cat VERSION 2>/dev/null || echo 0.0.0)
 
-.PHONY: help build test test-parity fmt fmt-check clippy spell doc deny bench reference clips check clean
+.PHONY: help build test test-parity fmt fmt-check clippy spell doc deny rt-gate bench bench-dist reference clips check clean
 help: ## Show this help message
 	@awk 'BEGIN{FS=":.*##"; printf "\nrnnoise-rs  v$(VERSION)\n\nTargets:\n"} /^[a-zA-Z_-]+:.*##/{printf "  %-12s %s\n",$$1,$$2}' $(MAKEFILE_LIST)
 	@echo ""
@@ -46,13 +46,19 @@ deny: ## cargo deny (advisories, licenses, bans, sources) — config in deny.tom
 bench: ## criterion benchmarks, results saved as a baseline for CI artifacts
 	cargo bench --all-features --bench process -- --save-baseline ci
 
+rt-gate: ## real-time contract gate: the per-frame path must not allocate, lock, do I/O, log or probe CPUID outside dispatch
+	python3 scripts/realtime_gate.py
+
+bench-dist: ## per-frame distribution (mean/p50/p99/p99.9/max) against the 10 ms budget
+	cargo bench --all-features --bench real_time_distribution
+
 reference: ## build the pinned Xiph C reference (scalar _c path) and run the clips
 	./scripts/c_reference.sh
 
 clips: ## regenerate the deterministic test clips in test_data/clips/
 	python3 scripts/make_clips.py
 
-check: fmt-check clippy spell test deny ## fmt + clippy + spell + test + deny (the CI gate)
+check: fmt-check clippy spell test deny rt-gate ## fmt + clippy + spell + test + deny + real-time gate (the CI gate)
 
 clean: ## cargo clean
 	cargo clean

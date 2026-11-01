@@ -44,5 +44,9 @@ pub use denoise::DenoiseState;
 pub use params::{FRAME_SIZE, FREQ_SIZE, NB_BANDS, NB_FEATURES, WINDOW_SIZE};
 pub use weights::{ModelError, RnnModel};
 
+/// Resolve the runtime CPU feature detection up front, so the first `process_frame`
+/// is not the first CPUID probe (`doc/realtime.md`).
+pub use simd::warmup;
+
 #[cfg(feature = "legacy-model")]
 pub use legacy::{DenoiseStateV1, RnnModelV1};

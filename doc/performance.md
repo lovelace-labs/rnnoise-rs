@@ -32,6 +32,34 @@ The current model is ~13× larger than the old one, so it cannot match the tiny
 old model on raw throughput — but it denoises far better, and it runs faster than
 the official C library (~1.5× on the same model; see [BENCHMARKS.md](../BENCHMARKS.md)).
 
+## Per-frame distribution
+
+A real-time callback is bounded by its worst frame, not its average one, so
+`make bench-dist` (`cargo bench --all-features --bench real_time_distribution`) reports the
+distribution: three runs of 20 000 frames after a 200-frame warm-up, each frame timed
+individually on the Zen 3 core (`Instant`, ~30–50 ns of overhead included), single thread, no
+real-time scheduling; the table is the mean of the three runs.
+
+| path | mean | p50 | p99 | p99.9 | max | headroom on the 10 ms budget (mean / max) |
+|---|--:|--:|--:|--:|--:|--:|
+| float (default) | 179.0 µs | 171.1 | 288.8 | 777.5 | **1525.8 µs** | 55.9× / 6.6× |
+| int8 quantized | 107.2 µs | 102.3 | 175.3 | 304.8 | **1876.7 µs** | 93.3× / 5.3× |
+| legacy (`legacy-model`) | 35.6 µs | 33.9 | 54.3 | 88.5 | **1013.3 µs** | 280.9× / 9.9× |
+
+The per-frame work itself is fixed-size (no unbounded loop, no allocation, no lock), so
+the p99.9/max tail is scheduler and page-fault noise rather than the algorithm. Cold start
+is measured separately because it is not part of the frame path: in a fresh process,
+construction ≈ 21.3 ms (tables, weight parse, the one-time CPUID probe) and the first frame
+≈ 1.06 ms; from frame 2 on, 0 allocations. The contract and how it is enforced are in
+[realtime.md](realtime.md).
+
+The per-frame work itself is fixed-size (no unbounded loop, no allocation, no lock), so
+the p99.9/max tail is scheduler and page-fault noise rather than the algorithm. Cold start
+is measured separately because it is not part of the frame path: in a fresh process,
+construction ≈ 14.3 ms (tables, weight parse, the one-time CPUID probe) and the first frame
+≈ 585 µs; from frame 2 on, 0 allocations. The contract and how it is enforced are in
+[realtime.md](realtime.md).
+
 ## Where the time goes
 
 For the **current model**, the neural net is ~89 % of a frame; the DSP front-end

@@ -65,6 +65,8 @@ jobs:
       - run: cargo build --all-features --verbose
       - name: Test
         run: cargo test --all-features ${{ matrix.profile == 'release' && '--release' || '' }} -- --nocapture
+      - name: Real-time gate
+        run: python3 scripts/realtime_gate.py
 
   # Each SIMD path the runner can actually execute. `simd::coverage` fails rather than
   # skipping when a tier is requested on hardware without the ISA, so the matrix lists

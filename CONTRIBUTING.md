@@ -29,7 +29,7 @@ workflow used across all `lovelace-labs/*-rs` repos.
 ```bash
 make build       # cargo build
 make test        # cargo test
-make check       # fmt-check + clippy + test + cargo-deny (the CI gate)
+make check       # fmt-check + clippy + spell + test + deny + rt-gate (the CI gate)
 ```
 
 Run `make help` for the full list of targets.
@@ -99,8 +99,11 @@ skip gracefully when the toolchain, the network or the clips are absent.
   `src/fft/x86_64.rs`, `src/fft/dispatch.rs`), each with a `SAFETY:` justification.
 - No `catch_unwind`, no threads, no unstable features, no async in the DSP path, nothing
   before `main()`, no `rustfmt::skip` except manual alignment.
-- The gate is `make check`: `fmt-check`, `clippy`, `spell`, `test`, `deny`.
-  `spell` runs cspell.
+- The gate is `make check`: `fmt-check`, `clippy`, `spell`, `test`, `deny`,
+  `rt-gate`. `spell` runs cspell; `rt-gate`
+  (`scripts/realtime_gate.py`) checks the real-time contract per function — no allocation,
+  lock, lazy static, I/O, logging or CPUID probe inside a per-frame function — and
+  `tests/real_time_no_alloc.rs` proves it at runtime.
 
 ## Module organization
 

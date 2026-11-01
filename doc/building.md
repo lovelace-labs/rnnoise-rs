@@ -74,13 +74,19 @@ cargo test --all-features   # + legacy-model + capi
 
 What runs: end-to-end parity vs the C reference and int8 accuracy
 (`tests/parity.rs`), legacy parity (`tests/legacy.rs`, needs `legacy-model`),
-public-API behaviour (`tests/api.rs`), and unit tests in `fft`/`nnet`. See
+public-API behaviour (`tests/api.rs`), the real-time contract
+(`tests/real_time_no_alloc.rs` — allocation-counting `GlobalAlloc`, and
+`tests/real_time_denormals.rs`), and unit tests in `fft`/`nnet`. See
 [parity.md](parity.md).
 
 The `simd`/`fft` tier tests skip a tier whose CPU does not have the feature, and print which
 tiers they exercised (`simd/tests.rs`), so a run that cannot cover tier v4 says so instead of
 looking green. One ignored timing test exists:
 `cargo test --release --lib fft_timing -- --ignored --nocapture`.
+
+The frame path is also gated at the source level by `make rt-gate`
+(`scripts/realtime_gate.py`): no allocation, lock, lazy static, I/O, logging or CPUID
+probe inside a per-frame function. See [realtime.md](realtime.md).
 
 ## Benchmarks
 

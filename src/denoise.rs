@@ -15,6 +15,7 @@ use crate::params::{
     PITCH_MAX_PERIOD, PITCH_MIN_PERIOD, WINDOW_SIZE,
 };
 use crate::pitch::{pitch_downsample, pitch_search, remove_doubling};
+use crate::simd;
 use crate::weights::RnnModel;
 
 fn common() -> &'static Common {
@@ -29,7 +30,16 @@ fn default_model() -> Arc<RnnModel> {
 
 /// Streaming RNNoise denoiser. Process audio one 480-sample frame at a time
 /// with [`DenoiseState::process_frame`].
+///
+/// Everything the frame path touches is fixed-size: the shared tables are resolved
+/// once in [`DenoiseState::new_with_model`] (and the CPU feature flags are warmed
+/// there too), and every buffer below is an array. `process_frame` therefore
+/// allocates nothing, locks nothing, and does no I/O — see
+/// `doc/realtime.md`
+/// and `tests/real_time_no_alloc.rs`.
 pub struct DenoiseState {
+    /// Shared tables, resolved at construction so the frame path never looks them up.
+    common: &'static Common,
     model: Arc<RnnModel>,
     rnn: RnnState,
     analysis_mem: [f32; FRAME_SIZE],
@@ -54,11 +64,18 @@ impl DenoiseState {
     }
 
     /// Create a denoiser backed by a specific (possibly custom) model.
+    ///
+    /// This is the last point on the path where anything is built: the shared tables
+    /// and the CPU feature flags are resolved here, so `process_frame` afterwards is
+    /// allocation-free and lock-free.
     #[must_use]
     pub fn new_with_model(model: Arc<RnnModel>) -> Self {
-        // Build shared tables eagerly so the first frame isn't penalised.
-        let _ = common();
+        // Build shared tables eagerly so the first frame isn't penalised, and warm the
+        // runtime feature detection for the same reason (see src/simd/warmup.rs).
+        let common = common();
+        simd::warmup();
         DenoiseState {
+            common,
             model,
             rnn: RnnState::new(),
             analysis_mem: [0.0; FRAME_SIZE],
@@ -90,10 +107,18 @@ impl DenoiseState {
     ///
     /// Note the one-frame algorithmic delay: the output corresponds to the
     /// *previous* input frame.
+    ///
+    /// Real-time contract: for a well-formed call this function performs no heap
+    /// allocation, takes no lock, does no I/O and logs nothing; every loop is
+    /// fixed-size, so the work per frame is bounded by the model geometry (worst case
+    /// is the non-silent frame, which runs the network). The only panic reachable from
+    /// here is the violated length invariant below, whose panic path may allocate — so
+    /// the guarantee is scoped to well-formed input. Measured percentiles: see
+    /// `doc/realtime.md`.
     pub fn process_frame(&mut self, output: &mut [f32], input: &[f32]) -> f32 {
         assert!(input.len() >= FRAME_SIZE && output.len() >= FRAME_SIZE);
 
-        let c = common();
+        let c = self.common;
         let mut x = [0.0f32; FRAME_SIZE];
         // DC-removal high-pass.
         const A_HP: [f32; 2] = [-1.99599, 0.99600];
@@ -172,7 +197,7 @@ impl DenoiseState {
 
     /// `rnn_frame_analysis`: windowed FFT + band energy of the input frame.
     fn frame_analysis(&mut self, xfreq: &mut [Cpx], ex: &mut [f32], input: &[f32]) {
-        let c = common();
+        let c = self.common;
         let mut x = [0.0f32; WINDOW_SIZE];
         x[..FRAME_SIZE].copy_from_slice(&self.analysis_mem);
         x[FRAME_SIZE..].copy_from_slice(&input[..FRAME_SIZE]);
@@ -194,7 +219,7 @@ impl DenoiseState {
         features: &mut [f32],
         input: &[f32],
     ) -> bool {
-        let c = common();
+        let c = self.common;
         self.frame_analysis(xfreq, ex, input);
 
         self.pitch_buf.copy_within(FRAME_SIZE.., 0);

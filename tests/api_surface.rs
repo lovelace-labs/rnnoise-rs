@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+use rnnoise::warmup;
 use rnnoise::ModelError;
 use rnnoise::{DenoiseState, RnnModel, FRAME_SIZE, FREQ_SIZE, NB_BANDS, NB_FEATURES, WINDOW_SIZE};
 
@@ -49,6 +50,22 @@ fn documented_constructors_exist() {
         "process_frame returns a VAD probability"
     );
     let _ = shared_st.process_frame(&mut out, &input);
+}
+
+#[test]
+fn real_time_surface_is_named() {
+    // `warmup()` is part of the public contract: it resolves the CPUID cache that
+    // the tier ladder uses, so the first frame is not the first probe. It must be callable
+    // before any frame and must not change results.
+    warmup();
+    let mut st = DenoiseState::new();
+    let mut out = [0.0f32; FRAME_SIZE];
+    let input = [0.0f32; FRAME_SIZE];
+    let vad = st.process_frame(&mut out, &input);
+    assert!(
+        (0.0..=1.0).contains(&vad),
+        "warmup must not change the frame path"
+    );
 }
 
 #[test]

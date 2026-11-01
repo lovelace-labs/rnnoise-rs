@@ -41,6 +41,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   committed so `cargo deny` checks a reproducible graph.
 - `simd-tier-override`: an opt-in, dev/CI-only feature that honours `RNNOISE_SIMD_TIER` in a
   normal build, so one kernel path can be measured against another. Zero cost when off.
+- `rnnoise::warmup()` resolves the runtime CPU feature detection before the first frame;
+  the constructors call it.
+- Real-time gates: `tests/real_time_no_alloc.rs` (no heap allocation in `process_frame`),
+  `tests/real_time_denormals.rs` (no subnormal slow path on realistic input),
+  `scripts/realtime_gate.py` (`make rt-gate`: no allocation, lock, lazy static, I/O,
+  logging or CPUID probe in a per-frame function), `benches/real_time_distribution.rs`
+  (per-frame percentiles against the 10 ms budget), documented in `doc/realtime.md`.
 
 ### Changed
 
@@ -54,6 +61,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The AVX-512 VNNI tier pays the `+128` bias that `vpdpbusd` needs once per layer instead of
   once per chunk, so its hot loop is one load plus one `vpdpbusd`: 52.8 → 45.5 µs of network
   per frame on a Zen 4 core, still bit-identical to the scalar reference.
+- `DenoiseState` and `DenoiseStateV1` resolve their shared tables at construction, so
+  `process_frame` performs no lazy lookup, and the legacy path no longer clones an `Arc` per
+  frame. No numerical change.
 
 ### Fixed
 

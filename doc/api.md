@@ -46,6 +46,11 @@ let vad: f32 = st.process_frame(&mut out, &inp); // out,inp: &[f32] ≥ FRAME_SI
 - `process_frame(&mut self, output, input) -> f32` — denoise one frame; returns
   the voice-activity probability in `[0, 1]`. `output` and `input` must each be at
   least `FRAME_SIZE` long (longer slices: only the first `FRAME_SIZE` are used).
+- `rnnoise::warmup()` — resolve the runtime CPU feature flags now instead of on the first
+  call. `new_with_model()` already does it, so a caller that builds its state outside the
+  audio callback does not need to call this; it exists for callers that construct the state
+  inside the callback, or that want the one-time probe attributable to startup. It changes
+  no output. See [realtime.md](realtime.md).
 
 ### Streaming whole signals
 

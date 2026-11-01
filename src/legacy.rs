@@ -26,6 +26,7 @@ use crate::params::{
     WINDOW_SIZE,
 };
 use crate::pitch::{pitch_downsample, pitch_search, remove_doubling};
+use crate::simd;
 use crate::weights::ModelError;
 
 const NB_BANDS: usize = 22;
@@ -553,6 +554,8 @@ impl RnnStateV1 {
 /// [`crate::DenoiseState`] (480-sample frames, 48 kHz mono), but smaller and
 /// faster at lower quality.
 pub struct DenoiseStateV1 {
+    /// Shared tables, resolved at construction so the frame path never looks them up.
+    common: &'static LegacyCommon,
     model: Arc<RnnModelV1>,
     rnn: RnnStateV1,
     lastg: [f32; NB_BANDS],
@@ -578,15 +581,20 @@ pub struct DenoiseStateV1 {
 
 impl DenoiseStateV1 {
     /// Create a denoiser using a (shared) legacy model.
+    ///
+    /// Same contract as [`crate::DenoiseState::new_with_model`]: everything the frame
+    /// path uses — tables, FFT plans, scratch, the feature flags — is built here.
     #[must_use]
     pub fn new_with_model(model: Arc<RnnModelV1>) -> Self {
-        let _ = legacy_common();
+        let common = legacy_common();
+        simd::warmup();
         let rnn = RnnStateV1::new(&model);
         let mut planner = RealFftPlanner::<f32>::new();
         let r2c = planner.plan_fft_forward(WINDOW_SIZE);
         let c2r = planner.plan_fft_inverse(WINDOW_SIZE);
         let scratch_len = r2c.get_scratch_len().max(c2r.get_scratch_len());
         DenoiseStateV1 {
+            common,
             model,
             rnn,
             lastg: [0.0; NB_BANDS],
@@ -629,9 +637,12 @@ impl DenoiseStateV1 {
     }
 
     /// Denoise one [`FRAME_SIZE`]-sample frame; returns the VAD probability.
+    ///
+    /// Same real-time contract as [`crate::DenoiseState::process_frame`]: nothing is
+    /// allocated, locked or read from the environment; every loop is fixed-size.
     pub fn process_frame(&mut self, output: &mut [f32], input: &[f32]) -> f32 {
         assert!(input.len() >= FRAME_SIZE && output.len() >= FRAME_SIZE);
-        let lc = legacy_common();
+        let lc = self.common;
 
         // Shift input history and high-pass filter the new frame into it.
         let new_idx = PITCH_BUF_SIZE - FRAME_SIZE;
@@ -652,8 +663,8 @@ impl DenoiseStateV1 {
         let mut gf = [1.0f32; FREQ_SIZE];
         let mut vad = [0.0f32];
         if !silence {
-            let model = self.model.clone();
-            self.rnn.compute(&model, &mut g, &mut vad, &self.features);
+            self.rnn
+                .compute(&self.model, &mut g, &mut vad, &self.features);
             self.pitch_filter(&g);
             for i in 0..NB_BANDS {
                 g[i] = g[i].max(0.6 * self.lastg[i]);

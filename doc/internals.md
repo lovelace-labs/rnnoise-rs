@@ -37,6 +37,8 @@ is not bit-exact (it tolerates ~1e-5), so it uses the faster `realfft` (rustfft)
 [`src/common.rs`](../src/common.rs)
 
 Built once into a `Common` (window, DCT matrix, FFT plan) behind a `OnceLock`.
+`DenoiseState` stores the resolved `&'static Common` from construction, so the per-frame
+path performs no lookup and holds no lazy state (`doc/realtime.md`).
 
 - **Window / DCT tables** are generated from the exact upstream formulas
   (`rnnoise_tables.c`): `half_window[i] = sin(½π · sin²(½π(i+½)/FRAME_SIZE))`;

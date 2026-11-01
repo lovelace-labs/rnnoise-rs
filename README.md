@@ -25,6 +25,13 @@ architecture: a 32-band DSP front-end feeding a **2×Conv1D + 3×GRU**,
   in the optional C ABI and the runtime-detected SIMD dot kernels: NEON `sdot`
   on aarch64, `pmovsxbw`/`pmaddwd` on x86-64).
 - Optional **C ABI** (`capi` feature) compatible with `rnnoise.h`.
+- **Real-time contract:** once the state is built, `process_frame` performs no heap
+  allocation, takes no lock, does no I/O and logs nothing, and every loop is fixed-size
+  (worst case is the non-silent frame). Enforced by an allocation-counting test
+  (`tests/real_time_no_alloc.rs`) and a source gate (`scripts/realtime_gate.py`, run by
+  `make rt-gate`). Per-frame **percentiles**, not only means, are in
+  [doc/realtime.md](doc/realtime.md): ~159 µs mean, ~1.04 ms max on a Zen 3 core against a
+  10 ms budget.
 
 ## Documentation
 

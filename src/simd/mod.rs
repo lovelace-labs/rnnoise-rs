@@ -16,10 +16,15 @@
 //! flags), not at build time: the crate compiles for the plain `x86-64` baseline
 //! and still uses AVX2/VNNI on a CPU that has them. `#[target_feature]` is only
 //! used on the kernel functions themselves, never as a build-wide setting.
+//!
+//! The CPUID probe itself happens once per process, on first use — which is why
+//! [`warmup`] resolves it at construction time, so no first frame in an audio callback
+//! pays for it (`doc/realtime.md`).
 
 mod dispatch;
 mod scalar;
 mod tier;
+mod warmup;
 
 // Unsafe island; the glob import is because `core::arch` intrinsics cannot be
 // imported one by one.
@@ -41,3 +46,4 @@ mod coverage;
 pub(crate) use dispatch::i8_dot;
 pub(crate) use dispatch::{dense_q8, dense_sgemv, dense_sgemv_blocks, sparse_sgemv8x4, xcorr};
 pub(crate) use tier::Tier;
+pub use warmup::warmup;
