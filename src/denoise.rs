@@ -16,6 +16,7 @@ use crate::params::{
 };
 use crate::pitch::{pitch_downsample, pitch_search, remove_doubling};
 use crate::simd;
+use crate::weights::error::ModelError;
 use crate::weights::RnnModel;
 
 fn common() -> &'static Common {
@@ -23,9 +24,23 @@ fn common() -> &'static Common {
     COMMON.get_or_init(Common::new)
 }
 
+#[cfg(any(feature = "embedded-model", feature = "embedded-model-int8"))]
+#[cfg(any(feature = "embedded-model", feature = "embedded-model-int8"))]
 fn default_model() -> Arc<RnnModel> {
     static MODEL: OnceLock<Arc<RnnModel>> = OnceLock::new();
     MODEL.get_or_init(|| Arc::new(RnnModel::default())).clone()
+}
+
+/// The built-in model, or `None` when no blob is compiled in.
+fn embedded_model() -> Option<Arc<RnnModel>> {
+    #[cfg(any(feature = "embedded-model", feature = "embedded-model-int8"))]
+    {
+        Some(default_model())
+    }
+    #[cfg(not(any(feature = "embedded-model", feature = "embedded-model-int8")))]
+    {
+        None
+    }
 }
 
 /// Streaming RNNoise denoiser. Process audio one 480-sample frame at a time
@@ -57,10 +72,28 @@ pub struct DenoiseState {
 }
 
 impl DenoiseState {
+    /// Create a denoiser using the built-in model, if one is compiled in.
+    ///
+    /// The always-available form of this constructor: with `embedded-model` or
+    /// `embedded-model-int8` it behaves like [`DenoiseState::new`]; with
+    /// `default-features = false` there is no default model to use, so it reports
+    /// [`ModelError::NoEmbeddedModel`] instead of assuming one exists. An application that loads
+    /// its model from a file should use [`DenoiseState::new_with_model`].
+    pub fn try_new() -> Result<Self, ModelError> {
+        match embedded_model() {
+            Some(model) => Ok(Self::new_with_model(model)),
+            None => Err(ModelError::NoEmbeddedModel),
+        }
+    }
+
     /// Create a denoiser using the built-in model (shared across instances).
+    ///
+    /// Only available with an embedded model (`embedded-model` or `embedded-model-int8`);
+    /// without one, load a model and pass it to [`DenoiseState::new_with_model`].
+    #[cfg(any(feature = "embedded-model", feature = "embedded-model-int8"))]
     #[must_use]
     pub fn new() -> Self {
-        Self::new_with_model(default_model())
+        Self::try_new().expect("an embedded model is compiled in")
     }
 
     /// Create a denoiser backed by a specific (possibly custom) model.
@@ -292,6 +325,7 @@ impl DenoiseState {
     }
 }
 
+#[cfg(any(feature = "embedded-model", feature = "embedded-model-int8"))]
 impl Default for DenoiseState {
     fn default() -> Self {
         Self::new()

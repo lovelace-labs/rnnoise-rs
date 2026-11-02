@@ -39,7 +39,10 @@ The reference is upstream RNNoise compiled **scalar**:
 runs it on x86-64, aarch64 and Apple Silicon. `tests/c_reference_parity.rs` then
 compares the port and the freshly built oracle against the committed goldens for
 every clip. It skips gracefully when the oracle or the clips are absent, so an
-offline `make check` stays green.
+offline `make check` stays green. It is gated to `embedded-model`: the goldens are
+the float model's output, so a build whose default model is the int8 blob cannot be
+checked against them (see [models.md](models.md#int8-quantized-model) and
+`tests/parity.rs::quantized_accuracy` for the int8 tolerance).
 
 The float-only model blob this crate embeds was cross-checked against the C
 library's *embedded* model by loading it through the C `rnnoise_model_from_file`

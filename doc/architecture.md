@@ -99,7 +99,7 @@ rotated, so output continues seamlessly.
 | [`celt_lpc`](../src/celt_lpc.rs) | LPC (Levinson), autocorrelation, FIR-5, inner-product / cross-correlation kernels | `celt_lpc.c`, `pitch.h` |
 | [`pitch`](../src/pitch.rs) | downsampling, coarse/fine pitch search, doubling removal | `pitch.c` |
 | [`nnet`](../src/nnet.rs) | `LinearLayer` (dense/sparse/int8), Conv1D, GRU, activations, `compute_rnn`, `RnnState` | `nnet.c`, `nnet_arch.h`, `vec.h`, `rnn.c` |
-| [`weights`](../src/weights.rs) | `RnnModel`, the `"DNNw"` blob parser, `ModelError`, the embedded default | `parse_lpcnet_weights.c`, `rnnoise_data.c` |
+| [`weights`](../src/weights/) | `RnnModel`, the `"DNNw"` blob parser, the `RNNS` container + checksum, the loaders, `ModelError`, the embedded blobs | `parse_lpcnet_weights.c`, `rnnoise_data.c` |
 | [`denoise`](../src/denoise.rs) | `DenoiseState`, `process_frame`, feature extraction, pitch filter, synthesis | `denoise.c` |
 | [`capi`](../src/capi.rs) | C ABI matching `rnnoise.h` (feature `capi`) | `rnnoise.h` |
 | [`legacy`](../src/legacy.rs) | the original 2018 model as `DenoiseStateV1` (feature `legacy-model`) | old RNNoise / `nnnoiseless` |

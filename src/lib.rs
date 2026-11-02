@@ -11,7 +11,9 @@
 //! ```no_run
 //! use rnnoise::DenoiseState;
 //!
-//! let mut st = DenoiseState::new();
+//! // `try_new()` is the form that compiles in every feature configuration: it uses the embedded
+//! // model when one is compiled in, and reports `ModelError::NoEmbeddedModel` when there is none.
+//! let mut st = DenoiseState::try_new().expect("model loaded");
 //! let input = [0.0f32; rnnoise::FRAME_SIZE];
 //! let mut output = [0.0f32; rnnoise::FRAME_SIZE];
 //! let vad_probability = st.process_frame(&mut output, &input);
@@ -42,7 +44,7 @@ pub mod legacy;
 
 pub use denoise::DenoiseState;
 pub use params::{FRAME_SIZE, FREQ_SIZE, NB_BANDS, NB_FEATURES, WINDOW_SIZE};
-pub use weights::{ModelError, RnnModel};
+pub use weights::{crc32, ModelError, RnnModel};
 
 /// Resolve the runtime CPU feature detection up front, so the first `process_frame`
 /// is not the first CPUID probe (`doc/realtime.md`).

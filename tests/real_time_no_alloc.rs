@@ -9,6 +9,10 @@
 //! This is the enforceable half of the contract documented in `doc/realtime.md`: the frame
 //! path uses fixed-size buffers, so a refactor that reaches for a `Vec`, a `Box`, a
 //! `format!` or a lazy static inside `process_frame` fails here rather than in the field.
+#![cfg(any(feature = "embedded-model", feature = "embedded-model-int8"))]
+// These tests need a model; with `default-features = false` there is no default one, so
+// they compile out rather than failing. The real-time gate itself still runs in the
+// all-features job.
 
 // Test island: `GlobalAlloc` is unsafe by trait definition, and the counting allocator is
 // the whole point of this file.

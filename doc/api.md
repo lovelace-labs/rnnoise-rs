@@ -80,18 +80,37 @@ fn denoise(samples: &[f32]) -> Vec<f32> {
 The immutable weights, shared across denoisers.
 
 ```rust
-let model = RnnModel::default();                       // the embedded model
+let model = RnnModel::default();                       // the embedded model (features)
 let model = RnnModel::from_bytes(&blob)?;              // a custom weight blob
+let model = RnnModel::from_file(Path::new("m.bin"))?;  // `model-loader` feature
 let fast  = RnnModel::default().quantized();           // int8 variant (see below)
+let bytes = model.to_bytes();                          // the mirror of from_bytes
 ```
 
-- `default()` — parse the embedded default model (panics only if the embedded
-  blob is somehow invalid, which is a build error, not a runtime one).
-- `from_bytes(&[u8]) -> Result<RnnModel, ModelError>` — load an upstream RNNoise
-  weight blob (the `"DNNw"` format produced by `dump_weights_blob`). See
+- `default()` — parse the embedded model. Only exists with `embedded-model` or
+  `embedded-model-int8`; the float blob wins when both are enabled, because feature
+  unification can enable both without anyone asking. Panics only if the embedded blob is
+  invalid, which is a build-time problem, not a runtime one.
+- `from_bytes(&[u8]) -> Result<RnnModel, ModelError>` — load an upstream RNNoise weight
+  blob (the `"DNNw"` format produced by `dump_weights_blob`), bare or inside the `RNNS`
+  container, whose format version, record count and checksum are verified. See
   [models.md](models.md).
+- `from_file(path)` and `from_file_with_checksum(path, expected_crc)`
+  (`model-loader` feature) — the on-demand path for an application that ships no embedded
+  blob. The pinned-checksum form is what catches a structurally plausible but wrong file;
+  a CRC32 is a corruption check, not an authenticity check. Both are startup paths: they
+  allocate and perform I/O, so they are not real-time-safe and must not run on the audio
+  thread. An existing memory mapping already works with no extra API: `from_bytes(&mmap)`.
+- `crc32(&[u8]) -> u32` — the CRC32 (IEEE, reflected) the container uses, exposed so a
+  caller can pin a downloaded blob before parsing it.
+- `to_bytes() -> Vec<u8>` — serialise the model as the `RNNS` container plus its records;
+  round-trips through `from_bytes`.
 - `quantized(self) -> RnnModel` — return an int8-quantized copy: ~4× smaller and
   ~3× faster, audibly identical, **not** bit-exact. See [models.md](models.md#int8-quantized-model).
+
+`ModelError` is `#[non_exhaustive]`: `Malformed`, `MissingArray`, `BadSize`, `BadType`,
+`UnsupportedVersion`, `ChecksumMismatch { expected, actual }`, `RecordCountMismatch`,
+`NoEmbeddedModel`, `Io`.
 
 ### Sharing a model across streams / threads
 

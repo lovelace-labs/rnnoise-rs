@@ -15,6 +15,10 @@
 //! above the boundary. FTZ/DAZ is deliberately **not** set by the crate — it would change
 //! results for exactly those pathological inputs, and bit-exactness is the contract
 //! (`doc/parity.md`). A caller that wants flushing sets it itself; see `doc/realtime.md`.
+#![cfg(any(feature = "embedded-model", feature = "embedded-model-int8"))]
+// These tests need a model; with `default-features = false` there is no default one, so
+// they compile out rather than failing. The real-time gate itself still runs in the
+// all-features job.
 
 use rnnoise::{DenoiseState, FRAME_SIZE};
 

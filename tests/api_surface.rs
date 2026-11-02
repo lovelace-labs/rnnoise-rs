@@ -7,8 +7,10 @@
 //!
 //! For the cross-crate view run `cargo public-api diff <last-release>`.
 
+#[cfg(any(feature = "embedded-model", feature = "embedded-model-int8"))]
 use std::sync::Arc;
 
+#[cfg(any(feature = "embedded-model", feature = "embedded-model-int8"))]
 use rnnoise::warmup;
 use rnnoise::ModelError;
 use rnnoise::{DenoiseState, RnnModel, FRAME_SIZE, FREQ_SIZE, NB_BANDS, NB_FEATURES, WINDOW_SIZE};
@@ -34,6 +36,7 @@ fn crate_root_surface_matches_the_docs() {
     );
 }
 
+#[cfg(any(feature = "embedded-model", feature = "embedded-model-int8"))]
 #[test]
 fn documented_constructors_exist() {
     // `new()` and `new_with_model()` (constructors are `new` / `new_with_foo`;
@@ -52,6 +55,7 @@ fn documented_constructors_exist() {
     let _ = shared_st.process_frame(&mut out, &input);
 }
 
+#[cfg(any(feature = "embedded-model", feature = "embedded-model-int8"))]
 #[test]
 fn real_time_surface_is_named() {
     // `warmup()` is part of the public contract: it resolves the CPUID cache that
@@ -69,6 +73,25 @@ fn real_time_surface_is_named() {
 }
 
 #[test]
+fn try_new_compiles_in_every_feature_configuration() {
+    // `try_new()` is the constructor that exists with or without an embedded model: it either
+    // constructs, or it reports that there is no default model to use. That is the whole point of
+    // making embedding optional — a build with no blob has no model, and must say so.
+    match DenoiseState::try_new() {
+        Ok(mut st) => {
+            let mut out = [0.0f32; FRAME_SIZE];
+            let vad = st.process_frame(&mut out, &[0.0f32; FRAME_SIZE]);
+            assert!((0.0..=1.0).contains(&vad));
+        }
+        Err(ModelError::NoEmbeddedModel) => {}
+        Err(other) => assert!(
+            matches!(other, ModelError::NoEmbeddedModel),
+            "unexpected error from try_new: {other}"
+        ),
+    }
+}
+
+#[test]
 fn error_type_is_public_and_open() {
     // `#[non_exhaustive]` means callers may match the known variants but must keep a
     // wildcard arm, so adding a variant later is not a breaking change.
@@ -82,6 +105,39 @@ fn error_type_is_public_and_open() {
         other => format!("unhandled variant {other:?}"),
     };
     assert!(!label.is_empty(), "the error type must be printable");
+}
+
+#[cfg(feature = "model-loader")]
+#[test]
+fn loader_surface_matches_the_docs() {
+    // The on-demand path: `from_file` and `from_file_with_checksum`, plus the public `crc32` a
+    // caller uses to pin a downloaded blob. Nothing here reads a real artifact — the point is that
+    // the documented names and signatures exist.
+    let from_file: fn(&std::path::Path) -> Result<RnnModel, ModelError> = RnnModel::from_file;
+    let pinned: fn(&std::path::Path, u32) -> Result<RnnModel, ModelError> =
+        RnnModel::from_file_with_checksum;
+    assert!(matches!(
+        from_file(std::path::Path::new("models/nope.bin")),
+        Err(ModelError::Io(_))
+    ));
+    assert!(matches!(
+        pinned(std::path::Path::new("models/nope.bin"), 0),
+        Err(ModelError::Io(_))
+    ));
+    assert_ne!(
+        rnnoise::crc32(b"DNNw"),
+        0,
+        "crc32 must be callable from outside"
+    );
+}
+
+#[cfg(any(feature = "embedded-model", feature = "embedded-model-int8"))]
+#[test]
+fn the_writer_round_trips_through_the_reader() {
+    // `to_bytes` is the mirror of `from_bytes`: whatever this crate writes, it must read back
+    // unchanged — including re-verifying the container header it wrote.
+    let model = RnnModel::default();
+    assert_eq!(RnnModel::from_bytes(&model.to_bytes()), Ok(model.clone()));
 }
 
 #[cfg(feature = "legacy-model")]

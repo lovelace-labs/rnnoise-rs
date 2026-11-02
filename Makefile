@@ -6,7 +6,7 @@
 
 VERSION := $(shell cat VERSION 2>/dev/null || echo 0.0.0)
 
-.PHONY: help build test test-parity fmt fmt-check clippy spell doc deny rt-gate bench bench-dist reference clips check clean
+.PHONY: help build test test-parity fmt fmt-check clippy spell doc deny rt-gate bench bench-dist reference clips features int8-blob check clean
 help: ## Show this help message
 	@awk 'BEGIN{FS=":.*##"; printf "\nrnnoise-rs  v$(VERSION)\n\nTargets:\n"} /^[a-zA-Z_-]+:.*##/{printf "  %-12s %s\n",$$1,$$2}' $(MAKEFILE_LIST)
 	@echo ""
@@ -58,7 +58,17 @@ reference: ## build the pinned Xiph C reference (scalar _c path) and run the cli
 clips: ## regenerate the deterministic test clips in test_data/clips/
 	python3 scripts/make_clips.py
 
-check: fmt-check clippy spell test deny rt-gate ## fmt + clippy + spell + test + deny + real-time gate (the CI gate)
+features: ## check every feature combination (the embedding matrix)
+	cargo check --all-targets --no-default-features
+	cargo check --all-targets --no-default-features --features model-loader
+	cargo check --all-targets --no-default-features --features embedded-model-int8
+	cargo check --all-targets --no-default-features --features embedded-model-int8,model-loader
+	cargo test --no-default-features --features model-loader
+
+int8-blob: ## regenerate models/rnnoise_default_int8.bin from the float blob
+	cargo run --release --example gen_int8_blob -- models/rnnoise_default.bin models/rnnoise_default_int8.bin
+
+check: fmt-check clippy spell features test deny rt-gate ## fmt + clippy + spell + feature matrix + test + deny + real-time gate (the CI gate)
 
 clean: ## cargo clean
 	cargo clean

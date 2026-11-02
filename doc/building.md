@@ -24,13 +24,23 @@ The release profile is tuned in `Cargo.toml` (`opt-level=3`, `lto=true`,
 
 | Feature | Default | Adds |
 |---|:--:|---|
-| *(none)* | ✓ | the current model; pure safe Rust, no deps |
+| `embedded-model` | ✓ | the float model blob, embedded with `include_bytes!` |
+| `embedded-model-int8` | | the pre-quantized blob (~3.0 MiB instead of 11.3 MiB) instead |
+| `model-loader` | | `RnnModel::from_file` / `from_file_with_checksum`; embeds nothing |
 | `capi` | | a C ABI (`#[no_mangle]` exports) matching `rnnoise.h` |
 | `legacy-model` | | the original 2018 model (`DenoiseStateV1`); dep: `realfft` |
+
+There is no `no-embedded` feature: Cargo cannot express "none" as a feature, and a
+negative feature has no consistent answer when two crates in one graph disagree. The
+none case is `default-features = false`: no blob, no `DenoiseState::new()`, and
+`RnnModel::from_file` (or `from_bytes`) instead. Measured sizes per combination are in
+[models.md](models.md#feature-combinations--measured-size).
 
 ```toml
 [dependencies]
 rnnoise-rs = { version = "0.1", features = ["legacy-model"] }
+# the size-conscious application:
+rnnoise-rs = { version = "0.1", default-features = false, features = ["model-loader"] }
 ```
 
 ## Runtime dispatch, not build-time flags
@@ -64,6 +74,11 @@ cargo run --release --bin rnnoise-demo -- <noisy.raw> <denoised.raw>
 RAW 16-bit machine-endian mono PCM @ 48 kHz in and out (not WAV), matching
 upstream `rnnoise_demo` (it drops the first output frame). To make a test input
 from a WAV, convert with e.g. `ffmpeg -i in.wav -f s16le -ar 48000 -ac 1 in.raw`.
+
+The demo declares `required-features = ["embedded-model"]` (same for the `process`
+bench): it needs a model it is not handed, so it is not built with
+`--no-default-features`. An application that loads its model from a file is the
+`model-loader` path.
 
 ## Tests
 
@@ -126,6 +141,7 @@ rnnoise_destroy(st);
 ```sh
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
+cargo check --all-targets --no-default-features --features model-loader -- -D warnings
 cargo doc --no-deps --all-features      # render the rustdoc
 ```
 
@@ -136,8 +152,11 @@ allowed crate-wide for bit-parity reasons (`manual_clamp`, `excessive_precision`
 ## CI
 
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs on push/PR:
-`fmt --check`, `clippy --all-targets --all-features -D warnings`, `build`, `test`,
-and a release/parity test pass.
+`fmt --check`, `clippy --all-targets --all-features -D warnings`, the feature matrix
+(`make features`: no-default-features, `model-loader`, `embedded-model-int8`, and the
+combination), `build`, `test`, and a release/parity test pass. The matrix is what keeps
+the no-blob configuration from rotting: a configuration nothing builds is a
+configuration nothing uses.
 
 The tier-equality tests skip a tier whose CPU feature is not present, so a green run is not
 coverage of that tier — GitHub-hosted runners do not reliably have AVX-512. The gate therefore
@@ -156,10 +175,10 @@ asserted unconditionally, so it is gated on every runner.
 src/            library modules (see internals.md for the map)
   bin/          rnnoise-demo CLI
 include/        rnnoise.h (C ABI header)
-models/         embedded weights (default .bin, legacy .rnn)
+models/         embedded weights (default float .bin, int8 .bin, legacy .rnn)
 test_data/      testing.raw + golden outputs (parity oracles)
 benches/        process.rs throughput harness
-examples/       bench_legacy.rs (fair legacy vs nnnoiseless)
+examples/       bench_legacy.rs (fair legacy vs nnnoiseless), gen_int8_blob.rs
 scripts/        gen_blob.c (regenerate the default model blob)
 doc/            this documentation
 bup/            upstream RNNoise + nnnoiseless sources (reference; git-ignored)

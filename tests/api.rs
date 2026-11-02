@@ -1,4 +1,5 @@
 //! Public-API behaviour tests (independent of the C reference).
+#![cfg(any(feature = "embedded-model", feature = "embedded-model-int8"))]
 
 use std::sync::Arc;
 

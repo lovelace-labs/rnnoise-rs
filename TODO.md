@@ -119,7 +119,13 @@ nnnoiseless 0.32 s (smaller/older model). The NN is 89 % of each frame and is
       weight table. Front-end 31.6 → 21.8 µs/frame on Zen 3. A *real-input* FFT would
       halve the transform again but changes rounding, so it is left as a separate,
       explicitly opt-in lever.
-- [ ] Ship a pre-quantized int8 / "little" model blob behind a feature so the
-      crate fits the crates.io 10 MB limit (default float blob is 11.3 MB).
+- [x] Ship a pre-quantized int8 blob behind a feature (`embedded-model-int8`, 3.0 MiB)
+      so the crate fits the crates.io 10 MB limit; embedding is now optional
+      (`embedded-model` default, `model-loader` for on-demand loading).
+- [ ] Raise the crates.io size limit for a published crate that keeps `embedded-model`
+      as its default feature (the float blob is 11.3 MiB), or publish with the int8 blob
+      as the packaged default. Decision, not code: it changes what a default build is.
+- [ ] Optional `memmap2` feature for the loader (peak RSS and cross-process page sharing)
+      — needs a cause; `from_bytes(&mmap)` already works with a caller-owned mapping.
 - [ ] `cargo-c` packaging / pkg-config for the C ABI; optional WAV I/O in the CLI.
 - [ ] Big-endian support in the blob loader (currently little-endian).

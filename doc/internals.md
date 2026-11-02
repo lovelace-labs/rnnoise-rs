@@ -150,14 +150,23 @@ float routines:
 
 ## `weights` — model loading
 
-[`src/weights.rs`](../src/weights.rs)
+[`src/weights/`](../src/weights/)
 
-`parse_weights` walks the `"DNNw"` records into a `name → (type, bytes)` map (with
-header validation); `f32_array`/`i32_array` extract typed arrays (little-endian);
-`linear` builds each layer, validating sizes (dense `m·n`, sparse `32·blocks` from
-`sparse_total_blocks`, bias/diag `n`). `RnnModel::from_bytes` wires the ten named
-layers; `RnnModel::quantized` produces the int8 variant. The default model is
-`include_bytes!`-embedded and parsed lazily behind an `Arc` (see `denoise`).
+`weights` is a module directory, not a file: `mod.rs` re-exports only, and the work is split
+across `blob` (records), `manifest` (the `RNNS` container and CRC32), `error`, `model`,
+`embedded` (the `include_bytes!` blobs, compiled in only when their feature is on), `loader`
+(`model-loader` feature) and `write`.
+
+`manifest::split` accepts a bare record stream or the container, and verifies the container's
+version, record count and checksum. `blob::parse_records` walks the records into a
+`name → (type, bytes)` map (with header validation, including the record `version`, which used to
+be read and ignored); `f32_array`/`i32_array`/`i8_array` extract typed arrays (little-endian);
+`linear` builds each layer from the records named after its base — `<base>_weights_float` or
+`<base>_weights_int8` plus `<base>_scale` — validating sizes (dense `m·n`, sparse `32·blocks`
+from `sparse_total_blocks`, bias/diag/scale `n`). `RnnModel::from_bytes` wires the ten named
+layers; `RnnModel::quantized` produces the int8 variant; `write::container` is the mirror. The
+embedded model is parsed lazily behind an `Arc` (see `denoise`), and `try_new()` is the
+constructor that works when nothing is embedded.
 
 ## `denoise` — the pipeline
 

@@ -193,3 +193,22 @@ jobs:
           name: bench-${{ matrix.runner }}-${{ matrix.tier }}
           path: target/criterion
           retention-days: 14
+  # Embedding is a feature, not a fact: a build with no blob must keep compiling and
+  # keep its tests honest. This is the configuration the size-conscious application uses.
+  features:
+    name: feature matrix (embedding is optional)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --all-targets --no-default-features
+      - run: cargo check --all-targets --no-default-features --features model-loader
+      - run: cargo check --all-targets --no-default-features --features embedded-model-int8
+      - run: cargo check --all-targets --no-default-features --features embedded-model-int8,model-loader
+      - run: cargo clippy --all-targets --no-default-features --features model-loader -- -D warnings
+      - run: cargo test --no-default-features
+      - run: cargo test --no-default-features --features model-loader
+      - run: cargo test --no-default-features --features embedded-model-int8

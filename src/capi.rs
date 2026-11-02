@@ -22,12 +22,19 @@ pub extern "C" fn rnnoise_get_frame_size() -> c_int {
 
 /// Allocate and initialise a denoiser. `model` may be NULL for the default model.
 ///
+/// With no embedded model (`default-features = false`), NULL is not a valid argument and the
+/// function returns NULL: the caller must pass a model from `rnnoise_model_from_buffer` or
+/// `rnnoise_model_from_filename`.
+///
 /// # Safety
 /// `model`, if non-NULL, must come from `rnnoise_model_from_buffer`.
 #[no_mangle]
 pub unsafe extern "C" fn rnnoise_create(model: *const RNNModel) -> *mut DenoiseState {
     let st = if model.is_null() {
-        DenoiseState::new()
+        match DenoiseState::try_new() {
+            Ok(st) => st,
+            Err(_) => return std::ptr::null_mut(),
+        }
     } else {
         DenoiseState::new_with_model((*model).0.clone())
     };

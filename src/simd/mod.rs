@@ -38,8 +38,10 @@ mod x86_64;
 #[allow(unsafe_code, clippy::wildcard_imports)] // unsafe island + glob exemption
 #[cfg(test)]
 mod tests;
-// Per-tier CI coverage (no unsafe: everything goes through `dispatch`).
-#[cfg(test)]
+// Per-tier CI coverage (no unsafe: everything goes through `dispatch`). It runs the whole
+// pipeline, so it needs a model: with `default-features = false` there is no default one and
+// the module compiles out rather than failing.
+#[cfg(all(test, any(feature = "embedded-model", feature = "embedded-model-int8")))]
 mod coverage;
 
 #[cfg(feature = "legacy-model")]

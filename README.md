@@ -20,7 +20,9 @@ architecture: a 32-band DSP front-end feeding a **2×Conv1D + 3×GRU**,
   100 s of audio: `rnnoise-rs` 3.13 s vs C `-O3` (NEON) 4.59 s vs C scalar
   4.90 s — about **1.5× faster**, at **~32× real time** single-threaded. Full
   methodology and a vs-`nnnoiseless` comparison are in [BENCHMARKS.md](BENCHMARKS.md).
-- **Self-contained:** the default model is embedded; no network or build step.
+- **Self-contained by default:** the float model is embedded; no network or build
+  step. With `default-features = false` nothing is embedded and the model is loaded
+  at startup (see [Embedding and binary size](#embedding-and-binary-size)).
 - **No dependencies** in the core library. Pure safe Rust (the only `unsafe` is
   in the optional C ABI and the runtime-detected SIMD dot kernels: NEON `sdot`
   on aarch64, `pmovsxbw`/`pmaddwd` on x86-64).
@@ -76,9 +78,33 @@ use std::sync::Arc;
 use rnnoise::{DenoiseState, RnnModel};
 
 let model = Arc::new(RnnModel::from_bytes(&std::fs::read("weights_blob.bin")?)?);
-let mut st = DenoiseState::with_model(model);
+let mut st = DenoiseState::new_with_model(model);
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
+
+### Embedding and binary size
+
+The default model is ~11.3 MiB of weight records, and it is embedded only when a
+feature asks for it:
+
+| Feature | What is in the binary |
+|---|---|
+| `embedded-model` (default) | the float blob — the bit-exact path, ~11.3 MiB |
+| `embedded-model-int8` | the pre-quantized blob, ~3.0 MiB (~4× smaller, ~3× faster, not bit-exact) |
+| `model-loader` | nothing embedded; `RnnModel::from_file` / `from_file_with_checksum` |
+
+Measured for a consumer that links the crate and denoises one frame (x86-64, release,
+`lto = true`): 12,384,024 B with `embedded-model`, 3,672,744 B with
+`embedded-model-int8`, 361,456 B with `model-loader` alone. A consumer that links the
+crate but never builds a denoiser is ~363 KB even with `embedded-model` on — the blob is
+not emitted when nothing references it, so the cost is paid by the code path that
+denoises, not by every link. A `staticlib` always carries the blob when the feature is
+on, and that is the case the feature flags actually change.
+
+To opt out: `default-features = false`. Without an embedded blob `DenoiseState::new()`
+does not exist; `try_new()` reports `ModelError::NoEmbeddedModel` rather than assuming a
+default model, and `new_with_model()` is the constructor. Full measurements and the
+feature semantics are in [doc/models.md](doc/models.md#feature-combinations--measured-size).
 
 ## "Better than nnnoiseless"?
 

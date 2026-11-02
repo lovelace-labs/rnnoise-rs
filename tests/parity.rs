@@ -1,6 +1,7 @@
 //! End-to-end parity against the upstream C reference (`rnnoise_demo`, scalar
 //! build) on `test_data/testing.raw`. The reference output was produced with
 //! the same float model embedded here.
+#![cfg(feature = "embedded-model")]
 
 use rnnoise::{DenoiseState, FRAME_SIZE};
 

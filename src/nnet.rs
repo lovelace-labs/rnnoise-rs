@@ -72,7 +72,7 @@ const MAX_GRU_3N: usize = 1152;
 /// opt-in int8 quantization. The int8 form is a **transposed, dense**
 /// `[output][input]` matrix with a per-output scale, which lets each output be a
 /// contiguous int8 dot product — ideal for the SIMD path in [`crate::simd`].
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Weights {
     Float(Vec<f32>),
     Q8 {
@@ -102,7 +102,7 @@ pub(crate) enum DenseLayout {
 
 /// Generic (sparse) affine transform — port of `LinearLayer` + `compute_linear`.
 /// Always carries a bias for the RNNoise model.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct LinearLayer {
     pub bias: Vec<f32>,
     pub weights: Weights,
@@ -211,6 +211,10 @@ impl LinearLayer {
             corr[o] = 128 * q[o * m..o * m + m].iter().map(|&v| v as i32).sum::<i32>();
         }
         self.weights = Weights::Q8 { w: q, scale, corr };
+        // The int8 form is one transposed matrix per output, so the float block layout no
+        // longer applies. Normalizing it here is what makes a model loaded from an int8 blob
+        // compare equal to the same model quantized at runtime.
+        self.dense_layout = DenseLayout::RowMajor;
     }
 }
 
