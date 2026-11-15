@@ -9,6 +9,8 @@ use core::arch::x86_64::*;
 // SAFETY: requires AVX2, checked at runtime by `select` before calling here. `idx`
 // is the upstream sparse layout (`rows` a multiple of 8, every `pos` inside `x`) as
 // produced by the blob loader; loads are unaligned, arithmetic exact float per lane.
+// The raw loads and the store go through bounds-checked slices, so a layout that
+// does not match `w` or `out` panics instead of reading or writing out of bounds.
 pub(crate) unsafe fn sparse_sgemv8x4(
     out: &mut [f32],
     w: &[f32],
@@ -29,7 +31,7 @@ pub(crate) unsafe fn sparse_sgemv8x4(
         for _ in 0..cols {
             let pos = idx[ii] as usize;
             ii += 1;
-            let p = w.as_ptr().add(wi);
+            let p = w[wi..wi + 32].as_ptr();
             acc = _mm256_add_ps(
                 acc,
                 _mm256_mul_ps(_mm256_loadu_ps(p), _mm256_set1_ps(x[pos])),
@@ -48,7 +50,7 @@ pub(crate) unsafe fn sparse_sgemv8x4(
             );
             wi += 32;
         }
-        _mm256_storeu_ps(out.as_mut_ptr().add(g * 8), acc);
+        _mm256_storeu_ps(out[g * 8..g * 8 + 8].as_mut_ptr(), acc);
         g += 1;
     }
 }

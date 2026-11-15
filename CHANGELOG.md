@@ -95,6 +95,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A model blob whose sparse weight index points at an unaligned block or past the layer's
   inputs is now rejected at load time with the new `ModelError::BadIndex`, as the C
   reference's `find_idx_check` does. It used to load and then panic inside `process_frame`.
+- The x86-64 VNNI and AVX2 sparse kernels no longer rely on the loader alone for their
+  lengths: an unexpected shape falls back to the bounds-checked scalar path or panics instead
+  of reading or writing out of bounds. Results are unchanged.
 
 ## [0.1.0]
 

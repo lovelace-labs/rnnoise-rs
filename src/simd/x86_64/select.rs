@@ -9,6 +9,7 @@
 //! implements (a kernel with no v2 form runs its v1 kernel, so a forced v2 is still
 //! meaningful coverage).
 
+use crate::params::MAX_Q8_INPUTS;
 use crate::simd::{scalar, x86_64, Tier};
 
 /// int8 dot-product ladder: v4 → v3 → v2 → v1.
@@ -43,8 +44,19 @@ pub(crate) fn dense_q8(
     // needs the VNNI bit, and the tier also uses `set1_epi8`/`add_epi8` for the +128 bias,
     // which are AVX512BW instructions. In practice every CPU with AVX512VNNI has AVX512BW,
     // but the gate should not depend on that.
+    //
+    // The VNNI kernels read the weights through raw pointers and stage the activations in a
+    // `MAX_Q8_INPUTS`-byte stack row, so they are only sound for the shape `nnet` always passes.
+    // Any other shape takes the bounds-checked scalar reference instead, which gives the same
+    // bits, so a wrong length can never turn into an out-of-bounds access.
+    let vnni_fits = m <= MAX_Q8_INPUTS && m.checked_mul(n).is_some_and(|len| w.len() >= len);
+    debug_assert!(
+        vnni_fits,
+        "dense_q8: {n}×{m} layer with {} weights",
+        w.len()
+    );
     match Tier::resolve(INT8_LADDER) {
-        Tier::Vnni => unsafe { x86_64::vnni::dense_q8(out, w, scale, corr, m, n, qx) },
+        Tier::Vnni if vnni_fits => unsafe { x86_64::vnni::dense_q8(out, w, scale, corr, m, n, qx) },
         Tier::Avx2 => unsafe { x86_64::avx2::dense_q8(out, w, scale, corr, m, n, qx) },
         Tier::Sse41 => unsafe { x86_64::sse41::dense_q8(out, w, scale, corr, m, n, qx) },
         Tier::Sse2 => unsafe { x86_64::sse2::dense_q8(out, w, scale, corr, m, n, qx) },
@@ -54,6 +66,11 @@ pub(crate) fn dense_q8(
 }
 
 pub(crate) fn sparse_sgemv8x4(out: &mut [f32], w: &[f32], idx: &[i32], rows: usize, x: &[f32]) {
+    debug_assert!(
+        rows.is_multiple_of(8) && out.len() >= rows,
+        "sparse_sgemv8x4: {rows} rows into {} outputs",
+        out.len()
+    );
     match Tier::resolve(AVX2_ONLY_LADDER) {
         Tier::Avx2 => unsafe { x86_64::sparse8x4::sparse_sgemv8x4(out, w, idx, rows, x) },
         _ => crate::simd::scalar::sparse_sgemv8x4(out, w, idx, rows, x),

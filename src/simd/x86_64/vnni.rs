@@ -90,8 +90,9 @@ unsafe fn dense_q8_hot(
 
 // SAFETY: same three feature checks as above, done by `select`. Unaligned 64-byte loads over
 // `min(w.len(), x.len())` — the length the reference zips to — plus the byte tail, so nothing
-// reads past either slice. `len` is at most `MAX_Q8_INPUTS` because that is the width of the
-// activation buffer `nnet` quantizes into, so the scratch buffer here is exactly one row.
+// reads past either slice. `len` is at most `MAX_Q8_INPUTS` because `select` only routes widths
+// up to that here (the width of the activation buffer `nnet` quantizes into), so the scratch
+// buffer here is exactly one row; `select` also checks `w` holds the whole `n × m` matrix.
 // This is the general form for widths that are not the hot width; the model never runs here (every
 // quantized layer is 384 bytes), but a custom model and the tail tests do.
 #[target_feature(enable = "avx512f")]
@@ -148,6 +149,7 @@ pub(crate) unsafe fn dense_q8(
     n: usize,
     qx: &[i8],
 ) {
+    debug_assert!(m <= MAX_Q8_INPUTS && w.len() >= m * n);
     if m == MAX_Q8_INPUTS && qx.len() >= m {
         dense_q8_hot(out, w, scale, corr, n, qx);
         return;
