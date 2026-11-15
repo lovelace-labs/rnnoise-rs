@@ -2,6 +2,14 @@
 //! (scalar `_c` path, float weights). Covers the dense/sparse affine transform,
 //! Conv1D, GRU, and the tanh/sigmoid rational-polynomial approximations.
 
+// These lints flag the arithmetic itself, which mirrors the C reference.
+#![allow(
+    clippy::excessive_precision,
+    clippy::manual_clamp,
+    clippy::needless_range_loop
+)]
+
+use crate::params::MAX_Q8_INPUTS;
 /// Activation kinds used by the RNNoise model.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Activation {
@@ -63,14 +71,38 @@ const MAX_GRU_3N: usize = 1152;
 /// Weight storage for a layer: full-precision float (bit-exact default) or an
 /// opt-in int8 quantization. The int8 form is a **transposed, dense**
 /// `[output][input]` matrix with a per-output scale, which lets each output be a
-/// contiguous int8 dot product — ideal for the NEON `sdot` path.
+/// contiguous int8 dot product — ideal for the SIMD path in [`crate::simd`].
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Weights {
     Float(Vec<f32>),
-    Q8 { w: Vec<i8>, scale: Vec<f32> },
+    Q8 {
+        w: Vec<i8>,
+        scale: Vec<f32>,
+        /// `128 · Σ w` per output row, computed at quantize time. Only the VNNI tier needs it:
+        /// `vpdpbusd` is unsigned × signed, so the `+128` lives in the activation domain (biased
+        /// once per layer) and each row pays this correction instead of a `vpaddb` per chunk.
+        /// Exact in `i32`, so the tier is bit-identical to the reference; the other tiers multiply
+        /// signed bytes and take it as `_corr`.
+        corr: Vec<i32>,
+    },
+}
+
+/// Storage form of a dense float layer. Both forms hold the same values; the choice is a
+/// memory layout, never an arithmetic one, because each output still receives its
+/// contributions in ascending input order.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum DenseLayout {
+    /// `w[j * n + o]` — the order the weight blob stores.
+    RowMajor,
+    /// `w[(o / 8) * 8 * m + j * 8 + (o % 8)]` — grouped per output block, so a tier can
+    /// keep one accumulator per group in a register for the whole `j` walk. Outputs that
+    /// do not complete a group keep a contiguous run of their own at the end.
+    Blocks8,
 }
 
 /// Generic (sparse) affine transform — port of `LinearLayer` + `compute_linear`.
 /// Always carries a bias for the RNNoise model.
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct LinearLayer {
     pub bias: Vec<f32>,
     pub weights: Weights,
@@ -80,6 +112,8 @@ pub(crate) struct LinearLayer {
     pub diag: Option<Vec<f32>>,
     pub nb_inputs: usize,
     pub nb_outputs: usize,
+    /// Layout of `Weights::Float`; irrelevant for the int8 and sparse forms.
+    pub dense_layout: DenseLayout,
 }
 
 impl LinearLayer {
@@ -89,9 +123,18 @@ impl LinearLayer {
         let m = self.nb_inputs;
         let out = &mut out[..n];
         match (&self.weights, &self.weights_idx) {
-            (Weights::Float(w), Some(idx)) => sparse_sgemv8x4(out, w, idx, n, input),
+            (Weights::Float(w), Some(idx)) => crate::simd::sparse_sgemv8x4(out, w, idx, n, input),
+            (Weights::Float(w), None) if self.dense_layout == DenseLayout::Blocks8 => {
+                crate::simd::dense_sgemv_blocks(out, w, m, n, input)
+            }
             (Weights::Float(w), None) => dense_sgemv(out, w, m, n, input),
-            (Weights::Q8 { w, scale }, _) => dense_q8(out, w, scale, m, n, input),
+            (Weights::Q8 { w, scale, corr }, _) => {
+                let mut qx = [0i8; MAX_Q8_INPUTS];
+                for (q, &x) in qx[..m].iter_mut().zip(&input[..m]) {
+                    *q = quant_x(x);
+                }
+                crate::simd::dense_q8(out, w, scale, corr, m, n, &qx[..m]);
+            }
         }
         for i in 0..n {
             out[i] += self.bias[i];
@@ -121,9 +164,16 @@ impl LinearLayer {
         let mut dense = vec![0.0f32; n * m];
         match &self.weights_idx {
             None => {
+                // Undo the layout before quantizing: the int8 form is always the plain
+                // transposed `[output][input]` matrix.
                 for o in 0..n {
                     for j in 0..m {
-                        dense[o * m + j] = w[j * n + o];
+                        let v = if self.dense_layout == DenseLayout::Blocks8 {
+                            w[(o / 8) * 8 * m + j * 8 + (o % 8)]
+                        } else {
+                            w[j * n + o]
+                        };
+                        dense[o * m + j] = v;
                     }
                 }
             }
@@ -143,6 +193,11 @@ impl LinearLayer {
         // runtime is `out[o] = scale[o] * Σ q_w·q_x` with an int32 dot product.
         let mut scale = vec![0.0f32; n];
         let mut q = vec![0i8; n * m];
+        // `128 · Σ_q w` per output row, from the quantized row itself. Only tier v4 reads it
+        // (`simd::x86_64::vnni`): `vpdpbusd` is unsigned × signed, so the `+128` moves to the
+        // activation side and each row pays this correction instead of a `vpaddb` per chunk.
+        // Exact in `i32` for the model's widths (`128 · 1536 · 127 = 2.5e7`).
+        let mut corr = vec![0i32; n];
         for o in 0..n {
             let row = &dense[o * m..o * m + m];
             let mx = row.iter().fold(0.0f32, |a, &v| a.max(v.abs()));
@@ -153,8 +208,13 @@ impl LinearLayer {
                     *qi = quant(v * inv);
                 }
             }
+            corr[o] = 128 * q[o * m..o * m + m].iter().map(|&v| v as i32).sum::<i32>();
         }
-        self.weights = Weights::Q8 { w: q, scale };
+        self.weights = Weights::Q8 { w: q, scale, corr };
+        // The int8 form is one transposed matrix per output, so the float block layout no
+        // longer applies. Normalizing it here is what makes a model loaded from an int8 blob
+        // compare equal to the same model quantized at runtime.
+        self.dense_layout = DenseLayout::RowMajor;
     }
 }
 
@@ -193,168 +253,8 @@ fn for_each_block(idx: &[i32], rows: usize, mut f: impl FnMut(usize, usize, usiz
 /// Dense float GEMV as a sequence of SAXPYs (j outer, i inner): streams the
 /// matrix sequentially (cache-friendly, auto-vectorisable) while preserving the
 /// per-`out[i]` accumulation order, so it is bit-identical to the C reference.
-fn dense_sgemv(out: &mut [f32], w: &[f32], m: usize, n: usize, input: &[f32]) {
-    for v in out.iter_mut() {
-        *v = 0.0;
-    }
-    for (j, &xj) in input[..m].iter().enumerate() {
-        let row = &w[j * n..j * n + n];
-        for (o, &wv) in out.iter_mut().zip(row.iter()) {
-            *o += wv * xj;
-        }
-    }
-}
-
-/// Largest input width of a quantized layer (conv2 and the GRUs are all 384).
-const MAX_Q8_INPUTS: usize = 384;
-
-/// int8 dense GEMV: quantize the activations, then `out[o] = scale[o] · (q_w[o] · q_x)`
-/// with an int32 dot product (NEON `sdot` when available, scalar otherwise — both
-/// give the exact same integer result, so output is independent of the path).
-fn dense_q8(out: &mut [f32], w: &[i8], scale: &[f32], m: usize, n: usize, input: &[f32]) {
-    let mut qx = [0i8; MAX_Q8_INPUTS];
-    for (q, &x) in qx[..m].iter_mut().zip(&input[..m]) {
-        *q = quant_x(x);
-    }
-    let qx = &qx[..m];
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        if std::arch::is_aarch64_feature_detected!("dotprod") {
-            // SAFETY: guarded by runtime detection of the `dotprod` feature.
-            unsafe { dense_q8_neon(out, w, scale, m, n, qx) };
-            return;
-        }
-    }
-    dense_q8_scalar(out, w, scale, m, n, qx);
-}
-
-fn dense_q8_scalar(out: &mut [f32], w: &[i8], scale: &[f32], m: usize, n: usize, qx: &[i8]) {
-    for o in 0..n {
-        let row = &w[o * m..o * m + m];
-        let mut acc = 0i32;
-        for (&wv, &xv) in row.iter().zip(qx) {
-            acc += wv as i32 * xv as i32;
-        }
-        out[o] = acc as f32 * scale[o];
-    }
-}
-
-/// int8 dot product of two equal-length slices, accumulated in i32 (NEON `sdot`
-/// when available, scalar otherwise — identical result). Used by the legacy
-/// model's GRU input matmuls.
-#[cfg(feature = "legacy-model")]
-pub(crate) fn i8_dot(w: &[i8], x: &[i8]) -> i32 {
-    let n = w.len();
-    #[cfg(target_arch = "aarch64")]
-    {
-        if std::arch::is_aarch64_feature_detected!("dotprod") {
-            // SAFETY: guarded by runtime `dotprod` detection.
-            return unsafe { i8_dot_neon(w, x, n) };
-        }
-    }
-    let mut acc = 0i32;
-    for k in 0..n {
-        acc += w[k] as i32 * x[k] as i32;
-    }
-    acc
-}
-
-#[cfg(all(feature = "legacy-model", target_arch = "aarch64"))]
-#[target_feature(enable = "dotprod")]
-unsafe fn i8_dot_neon(w: &[i8], x: &[i8], n: usize) -> i32 {
-    use core::arch::aarch64::*;
-    let mut acc = vdupq_n_s32(0);
-    let mut k = 0;
-    while k + 16 <= n {
-        acc = sdot(
-            acc,
-            vld1q_s8(w.as_ptr().add(k)),
-            vld1q_s8(x.as_ptr().add(k)),
-        );
-        k += 16;
-    }
-    let mut sum = vaddvq_s32(acc);
-    while k < n {
-        sum += *w.as_ptr().add(k) as i32 * *x.as_ptr().add(k) as i32;
-        k += 1;
-    }
-    sum
-}
-
-/// Single `sdot` (signed int8 dot-product, 4 MACs/lane) via inline asm — the
-/// `vdotq_s32` intrinsic is still unstable on stable Rust, but the instruction
-/// is reachable directly. Requires the `dotprod` target feature.
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "dotprod")]
-#[inline]
-unsafe fn sdot(
-    acc: core::arch::aarch64::int32x4_t,
-    a: core::arch::aarch64::int8x16_t,
-    b: core::arch::aarch64::int8x16_t,
-) -> core::arch::aarch64::int32x4_t {
-    let mut acc = acc;
-    core::arch::asm!(
-        "sdot {acc:v}.4s, {a:v}.16b, {b:v}.16b",
-        acc = inout(vreg) acc,
-        a = in(vreg) a,
-        b = in(vreg) b,
-        options(pure, nomem, nostack),
-    );
-    acc
-}
-
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "dotprod")]
-unsafe fn dense_q8_neon(out: &mut [f32], w: &[i8], scale: &[f32], m: usize, n: usize, qx: &[i8]) {
-    use core::arch::aarch64::*;
-    let nchunks = m / 16;
-    for o in 0..n {
-        let row = w.as_ptr().add(o * m);
-        let mut acc = vdupq_n_s32(0);
-        let mut k = 0usize;
-        for _ in 0..nchunks {
-            let wv = vld1q_s8(row.add(k));
-            let xv = vld1q_s8(qx.as_ptr().add(k));
-            acc = sdot(acc, wv, xv);
-            k += 16;
-        }
-        let mut sum = vaddvq_s32(acc);
-        while k < m {
-            sum += *row.add(k) as i32 * qx[k] as i32;
-            k += 1;
-        }
-        out[o] = sum as f32 * scale[o];
-    }
-}
-
-/// Port of `sparse_sgemv8x4` (float weights). `out` length is `rows`.
-fn sparse_sgemv8x4(out: &mut [f32], w: &[f32], idx: &[i32], rows: usize, x: &[f32]) {
-    for v in out.iter_mut() {
-        *v = 0.0;
-    }
-    let mut wi = 0usize;
-    let mut ii = 0usize;
-    let mut i = 0usize;
-    while i < rows {
-        let cols = idx[ii] as usize;
-        ii += 1;
-        // Fixed-length subslice lets the compiler drop bounds checks and
-        // vectorise the 8-wide row update cleanly.
-        let out8 = &mut out[i..i + SPARSE_ROWS];
-        for _ in 0..cols {
-            let pos = idx[ii] as usize;
-            ii += 1;
-            let xs = &x[pos..pos + 4];
-            let (xj0, xj1, xj2, xj3) = (xs[0], xs[1], xs[2], xs[3]);
-            let wb = &w[wi..wi + 32];
-            for r in 0..SPARSE_ROWS {
-                out8[r] += wb[r] * xj0 + wb[8 + r] * xj1 + wb[16 + r] * xj2 + wb[24 + r] * xj3;
-            }
-            wi += 32;
-        }
-        i += SPARSE_ROWS;
-    }
+pub(crate) fn dense_sgemv(out: &mut [f32], w: &[f32], m: usize, n: usize, input: &[f32]) {
+    crate::simd::dense_sgemv(out, w, m, n, input);
 }
 
 /// `compute_generic_dense`: linear + activation.
@@ -515,33 +415,14 @@ mod tests {
 
     #[test]
     fn activations_bounds() {
-        assert!((tanh_approx(0.0)).abs() < 1e-6);
-        assert!((sigmoid_approx(0.0) - 0.5).abs() < 1e-6);
+        assert!((tanh_approx(0.0)).abs() < 1e-6, "tanh_approx(0) must be 0");
+        assert!(
+            (sigmoid_approx(0.0) - 0.5).abs() < 1e-6,
+            "sigmoid_approx(0) must be 0.5"
+        );
         assert!(tanh_approx(100.0) <= 1.0 && tanh_approx(100.0) > 0.999);
         assert!(tanh_approx(-100.0) >= -1.0 && tanh_approx(-100.0) < -0.999);
     }
 
-    // The `sdot` inline-asm path must produce exactly the same result as the
-    // portable scalar dot product (both are exact int32 arithmetic).
-    #[cfg(target_arch = "aarch64")]
-    #[test]
-    fn sdot_matches_scalar() {
-        if !std::arch::is_aarch64_feature_detected!("dotprod") {
-            return;
-        }
-        let (m, n) = (384usize, 70usize);
-        let mut s = 7u32;
-        let mut next = || {
-            s = s.wrapping_mul(1664525).wrapping_add(1013904223);
-            (s >> 24) as i32 as i8
-        };
-        let w: Vec<i8> = (0..n * m).map(|_| next()).collect();
-        let qx: Vec<i8> = (0..m).map(|_| next()).collect();
-        let scale: Vec<f32> = (0..n).map(|i| (i as f32 + 1.0) * 1e-4).collect();
-        let mut a = vec![0.0f32; n];
-        let mut b = vec![0.0f32; n];
-        dense_q8_scalar(&mut a, &w, &scale, m, n, &qx);
-        unsafe { dense_q8_neon(&mut b, &w, &scale, m, n, &qx) };
-        assert_eq!(a, b, "sdot asm path diverged from scalar");
-    }
+    // SIMD-vs-scalar equality lives in `src/simd/tests.rs`.
 }

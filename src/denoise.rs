@@ -3,31 +3,58 @@
 //! pitch-comb filtering, gain smoothing and windowed overlap-add synthesis,
 //! with the one-frame look-ahead delay used by upstream.
 
+// These lints flag the arithmetic itself, which mirrors the C reference.
+#![allow(clippy::needless_range_loop, clippy::manual_clamp)]
 use std::sync::{Arc, OnceLock};
 
-use crate::common::{biquad, compute_band_corr, compute_band_energy, interp_band_gain, Common};
+use crate::common::{biquad, Common};
 use crate::fft::Cpx;
 use crate::nnet::{compute_rnn, RnnState};
-use crate::pitch::{pitch_downsample, pitch_search, remove_doubling};
-use crate::weights::RnnModel;
-use crate::{
+use crate::params::{
     FRAME_SIZE, FREQ_SIZE, NB_BANDS, NB_FEATURES, PITCH_BUF_SIZE, PITCH_FRAME_SIZE,
     PITCH_MAX_PERIOD, PITCH_MIN_PERIOD, WINDOW_SIZE,
 };
+use crate::pitch::{pitch_downsample, pitch_search, remove_doubling};
+use crate::simd;
+use crate::weights::error::ModelError;
+use crate::weights::RnnModel;
 
 fn common() -> &'static Common {
     static COMMON: OnceLock<Common> = OnceLock::new();
     COMMON.get_or_init(Common::new)
 }
 
+#[cfg(any(feature = "embedded-model", feature = "embedded-model-int8"))]
+#[cfg(any(feature = "embedded-model", feature = "embedded-model-int8"))]
 fn default_model() -> Arc<RnnModel> {
     static MODEL: OnceLock<Arc<RnnModel>> = OnceLock::new();
     MODEL.get_or_init(|| Arc::new(RnnModel::default())).clone()
 }
 
+/// The built-in model, or `None` when no blob is compiled in.
+fn embedded_model() -> Option<Arc<RnnModel>> {
+    #[cfg(any(feature = "embedded-model", feature = "embedded-model-int8"))]
+    {
+        Some(default_model())
+    }
+    #[cfg(not(any(feature = "embedded-model", feature = "embedded-model-int8")))]
+    {
+        None
+    }
+}
+
 /// Streaming RNNoise denoiser. Process audio one 480-sample frame at a time
 /// with [`DenoiseState::process_frame`].
+///
+/// Everything the frame path touches is fixed-size: the shared tables are resolved
+/// once in [`DenoiseState::new_with_model`] (and the CPU feature flags are warmed
+/// there too), and every buffer below is an array. `process_frame` therefore
+/// allocates nothing, locks nothing, and does no I/O — see
+/// `doc/realtime.md`
+/// and `tests/real_time_no_alloc.rs`.
 pub struct DenoiseState {
+    /// Shared tables, resolved at construction so the frame path never looks them up.
+    common: &'static Common,
     model: Arc<RnnModel>,
     rnn: RnnState,
     analysis_mem: [f32; FRAME_SIZE],
@@ -45,16 +72,43 @@ pub struct DenoiseState {
 }
 
 impl DenoiseState {
+    /// Create a denoiser using the built-in model, if one is compiled in.
+    ///
+    /// The always-available form of this constructor: with `embedded-model` or
+    /// `embedded-model-int8` it behaves like [`DenoiseState::new`]; with
+    /// `default-features = false` there is no default model to use, so it reports
+    /// [`ModelError::NoEmbeddedModel`] instead of assuming one exists. An application that loads
+    /// its model from a file should use [`DenoiseState::new_with_model`].
+    pub fn try_new() -> Result<Self, ModelError> {
+        match embedded_model() {
+            Some(model) => Ok(Self::new_with_model(model)),
+            None => Err(ModelError::NoEmbeddedModel),
+        }
+    }
+
     /// Create a denoiser using the built-in model (shared across instances).
+    ///
+    /// Only available with an embedded model (`embedded-model` or `embedded-model-int8`);
+    /// without one, load a model and pass it to [`DenoiseState::new_with_model`].
+    #[cfg(any(feature = "embedded-model", feature = "embedded-model-int8"))]
+    #[must_use]
     pub fn new() -> Self {
-        Self::with_model(default_model())
+        Self::try_new().expect("an embedded model is compiled in")
     }
 
     /// Create a denoiser backed by a specific (possibly custom) model.
-    pub fn with_model(model: Arc<RnnModel>) -> Self {
-        // Build shared tables eagerly so the first frame isn't penalised.
-        let _ = common();
+    ///
+    /// This is the last point on the path where anything is built: the shared tables
+    /// and the CPU feature flags are resolved here, so `process_frame` afterwards is
+    /// allocation-free and lock-free.
+    #[must_use]
+    pub fn new_with_model(model: Arc<RnnModel>) -> Self {
+        // Build shared tables eagerly so the first frame isn't penalised, and warm the
+        // runtime feature detection for the same reason (see src/simd/warmup.rs).
+        let common = common();
+        simd::warmup();
         DenoiseState {
+            common,
             model,
             rnn: RnnState::new(),
             analysis_mem: [0.0; FRAME_SIZE],
@@ -72,15 +126,32 @@ impl DenoiseState {
         }
     }
 
+    /// Deprecated alias for [`DenoiseState::new_with_model`]. The `with_foo()` form is
+    /// reserved for closure accessors, so constructors are named `new_with_foo()`.
+    #[deprecated(since = "0.2.0", note = "use `new_with_model()`")]
+    #[must_use]
+    pub fn with_model(model: Arc<RnnModel>) -> Self {
+        Self::new_with_model(model)
+    }
+
     /// Denoise one frame. `input` and `output` must both be [`FRAME_SIZE`]
     /// samples (48 kHz mono, amplitudes in roughly `i16` range). Returns the
     /// voice-activity probability for the frame.
     ///
     /// Note the one-frame algorithmic delay: the output corresponds to the
     /// *previous* input frame.
+    ///
+    /// Real-time contract: for a well-formed call this function performs no heap
+    /// allocation, takes no lock, does no I/O and logs nothing; every loop is
+    /// fixed-size, so the work per frame is bounded by the model geometry (worst case
+    /// is the non-silent frame, which runs the network). The only panic reachable from
+    /// here is the violated length invariant below, whose panic path may allocate — so
+    /// the guarantee is scoped to well-formed input. Measured percentiles: see
+    /// `doc/realtime.md`.
     pub fn process_frame(&mut self, output: &mut [f32], input: &[f32]) -> f32 {
         assert!(input.len() >= FRAME_SIZE && output.len() >= FRAME_SIZE);
 
+        let c = self.common;
         let mut x = [0.0f32; FRAME_SIZE];
         // DC-removal high-pass.
         const A_HP: [f32; 2] = [-1.99599, 0.99600];
@@ -124,6 +195,7 @@ impl DenoiseState {
                 &features,
             );
             pitch_filter(
+                c,
                 &mut self.delayed_x,
                 &self.delayed_p,
                 &self.delayed_ex,
@@ -138,14 +210,14 @@ impl DenoiseState {
                 let t = g[i] as f64 * (self.delayed_ex[i] as f64 + 1e-3) / (ex[i] as f64 + 1e-3);
                 self.lastg[i] = t.min(1.0) as f32;
             }
-            interp_band_gain(&mut gf, &g);
+            c.interp_band_gain(&mut gf, &g);
             for i in 0..FREQ_SIZE {
                 self.delayed_x[i].r *= gf[i];
                 self.delayed_x[i].i *= gf[i];
             }
         }
 
-        frame_synthesis(common(), output, &mut self.synthesis_mem, &self.delayed_x);
+        frame_synthesis(c, output, &mut self.synthesis_mem, &self.delayed_x);
 
         self.delayed_x.copy_from_slice(&xfreq);
         self.delayed_p.copy_from_slice(&p);
@@ -158,14 +230,14 @@ impl DenoiseState {
 
     /// `rnn_frame_analysis`: windowed FFT + band energy of the input frame.
     fn frame_analysis(&mut self, xfreq: &mut [Cpx], ex: &mut [f32], input: &[f32]) {
-        let c = common();
+        let c = self.common;
         let mut x = [0.0f32; WINDOW_SIZE];
         x[..FRAME_SIZE].copy_from_slice(&self.analysis_mem);
         x[FRAME_SIZE..].copy_from_slice(&input[..FRAME_SIZE]);
         self.analysis_mem.copy_from_slice(&input[..FRAME_SIZE]);
         c.apply_window(&mut x);
         c.forward_transform(xfreq, &x);
-        compute_band_energy(ex, xfreq);
+        c.compute_band_energy(ex, xfreq);
     }
 
     /// `rnn_compute_frame_features`: returns `true` if the frame is silence.
@@ -180,7 +252,7 @@ impl DenoiseState {
         features: &mut [f32],
         input: &[f32],
     ) -> bool {
-        let c = common();
+        let c = self.common;
         self.frame_analysis(xfreq, ex, input);
 
         self.pitch_buf.copy_within(FRAME_SIZE.., 0);
@@ -214,14 +286,18 @@ impl DenoiseState {
         pbuf.copy_from_slice(&self.pitch_buf[base..base + WINDOW_SIZE]);
         c.apply_window(&mut pbuf);
         c.forward_transform(p, &pbuf);
-        compute_band_energy(ep, p);
-        compute_band_corr(exp, xfreq, p);
+        c.compute_band_energy(ep, p);
+        c.compute_band_corr(exp, xfreq, p);
         for i in 0..NB_BANDS {
             let d = 0.001f64 + (ex[i] * ep[i]) as f64;
             exp[i] = (exp[i] as f64 / d.sqrt()) as f32;
         }
         c.dct(&mut features[NB_BANDS..], exp);
-        features[2 * NB_BANDS] = 0.01 * (pitch_index as f32 - 300.0);
+        // `.01` in the C reference is a `double` literal, so the product is computed in
+        // double and narrowed to float on assignment — like every other promotion in this
+        // file. This is the one feature where the port and the pinned oracle disagreed
+        // (feature 64), and the whole speech residual came from it: see doc/parity.md.
+        features[2 * NB_BANDS] = (0.01f64 * (pitch_index as f64 - 300.0)) as f32;
 
         let mut ly = [0.0f32; NB_BANDS];
         let mut log_max = -2.0f32;
@@ -249,6 +325,7 @@ impl DenoiseState {
     }
 }
 
+#[cfg(any(feature = "embedded-model", feature = "embedded-model-int8"))]
 impl Default for DenoiseState {
     fn default() -> Self {
         Self::new()
@@ -269,7 +346,15 @@ fn frame_synthesis(c: &Common, out: &mut [f32], synthesis_mem: &mut [f32], y: &[
 
 /// `rnn_pitch_filter`: comb-filter the spectrum towards the pitch-predicted
 /// spectrum `p`, then renormalise band energy.
-fn pitch_filter(xfreq: &mut [Cpx], p: &[Cpx], ex: &[f32], ep: &[f32], exp: &[f32], g: &[f32]) {
+fn pitch_filter(
+    c: &Common,
+    xfreq: &mut [Cpx],
+    p: &[Cpx],
+    ex: &[f32],
+    ep: &[f32],
+    exp: &[f32],
+    g: &[f32],
+) {
     let mut r = [0.0f32; NB_BANDS];
     for i in 0..NB_BANDS {
         let mut ri = if exp[i] > g[i] {
@@ -286,19 +371,19 @@ fn pitch_filter(xfreq: &mut [Cpx], p: &[Cpx], ex: &[f32], ep: &[f32], exp: &[f32
         r[i] = ri;
     }
     let mut rf = [0.0f32; FREQ_SIZE];
-    interp_band_gain(&mut rf, &r);
+    c.interp_band_gain(&mut rf, &r);
     for i in 0..FREQ_SIZE {
         xfreq[i].r += rf[i] * p[i].r;
         xfreq[i].i += rf[i] * p[i].i;
     }
     let mut new_e = [0.0f32; NB_BANDS];
-    compute_band_energy(&mut new_e, xfreq);
+    c.compute_band_energy(&mut new_e, xfreq);
     let mut norm = [0.0f32; NB_BANDS];
     for i in 0..NB_BANDS {
         norm[i] = (ex[i] as f64 / (1e-8 + new_e[i] as f64)).sqrt() as f32;
     }
     let mut normf = [0.0f32; FREQ_SIZE];
-    interp_band_gain(&mut normf, &norm);
+    c.interp_band_gain(&mut normf, &norm);
     for i in 0..FREQ_SIZE {
         xfreq[i].r *= normf[i];
         xfreq[i].i *= normf[i];

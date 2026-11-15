@@ -20,10 +20,20 @@ architecture: a 32-band DSP front-end feeding a **2×Conv1D + 3×GRU**,
   100 s of audio: `rnnoise-rs` 3.13 s vs C `-O3` (NEON) 4.59 s vs C scalar
   4.90 s — about **1.5× faster**, at **~32× real time** single-threaded. Full
   methodology and a vs-`nnnoiseless` comparison are in [BENCHMARKS.md](BENCHMARKS.md).
-- **Self-contained:** the default model is embedded; no network or build step.
+- **Self-contained by default:** the float model is embedded; no network or build
+  step. With `default-features = false` nothing is embedded and the model is loaded
+  at startup (see [Embedding and binary size](#embedding-and-binary-size)).
 - **No dependencies** in the core library. Pure safe Rust (the only `unsafe` is
-  in the optional C ABI and the optional NEON `sdot` kernel).
+  in the optional C ABI and the runtime-detected SIMD dot kernels: NEON `sdot`
+  on aarch64, `pmovsxbw`/`pmaddwd` on x86-64).
 - Optional **C ABI** (`capi` feature) compatible with `rnnoise.h`.
+- **Real-time contract:** once the state is built, `process_frame` performs no heap
+  allocation, takes no lock, does no I/O and logs nothing, and every loop is fixed-size
+  (worst case is the non-silent frame). Enforced by an allocation-counting test
+  (`tests/real_time_no_alloc.rs`) and a source gate (`scripts/realtime_gate.py`, run by
+  `make rt-gate`). Per-frame **percentiles**, not only means, are in
+  [doc/realtime.md](doc/realtime.md): ~159 µs mean, ~1.04 ms max on a Zen 3 core against a
+  10 ms budget.
 
 ## Documentation
 
@@ -68,9 +78,33 @@ use std::sync::Arc;
 use rnnoise::{DenoiseState, RnnModel};
 
 let model = Arc::new(RnnModel::from_bytes(&std::fs::read("weights_blob.bin")?)?);
-let mut st = DenoiseState::with_model(model);
+let mut st = DenoiseState::new_with_model(model);
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
+
+### Embedding and binary size
+
+The default model is ~11.3 MiB of weight records, and it is embedded only when a
+feature asks for it:
+
+| Feature | What is in the binary |
+|---|---|
+| `embedded-model` (default) | the float blob — the bit-exact path, ~11.3 MiB |
+| `embedded-model-int8` | the pre-quantized blob, ~3.0 MiB (~4× smaller, ~3× faster, not bit-exact) |
+| `model-loader` | nothing embedded; `RnnModel::from_file` / `from_file_with_checksum` |
+
+Measured for a consumer that links the crate and denoises one frame (x86-64, release,
+`lto = true`): 12,384,024 B with `embedded-model`, 3,672,744 B with
+`embedded-model-int8`, 361,456 B with `model-loader` alone. A consumer that links the
+crate but never builds a denoiser is ~363 KB even with `embedded-model` on — the blob is
+not emitted when nothing references it, so the cost is paid by the code path that
+denoises, not by every link. A `staticlib` always carries the blob when the feature is
+on, and that is the case the feature flags actually change.
+
+To opt out: `default-features = false`. Without an embedded blob `DenoiseState::new()`
+does not exist; `try_new()` reports `ModelError::NoEmbeddedModel` rather than assuming a
+default model, and `new_with_model()` is the constructor. Full measurements and the
+feature semantics are in [doc/models.md](doc/models.md#feature-combinations--measured-size).
 
 ## "Better than nnnoiseless"?
 
@@ -89,7 +123,7 @@ delivers is the much higher **quality** of the modern model, implemented faster
 than the official C library, and still comfortably real-time (32× on one core).
 See [BENCHMARKS.md](BENCHMARKS.md) for the full comparison and a speed-up study.
 
-### Faster + smaller (int8 + `sdot`)
+### Faster + smaller (int8 + SIMD dot products)
 
 `RnnModel::quantized()` returns an int8 version of the model: **~3× faster**
 (105 µs/frame, ~95× real time — via ARM `sdot` 4-MAC int8 dot products) and **~4×
@@ -104,9 +138,13 @@ let model = Arc::new(RnnModel::default().quantized());
 let mut st = DenoiseState::with_model(model);
 ```
 
-On aarch64 with the `dotprod` CPU feature this uses an inline-asm `sdot` kernel;
-elsewhere it falls back to a portable scalar dot product (identical results, see
-[BENCHMARKS.md](BENCHMARKS.md)).
+The dot kernel is picked at **runtime**, per CPU, not by build flags: `sdot` on
+aarch64 with `dotprod`, and on x86-64 a tier ladder (SSE2 → SSE4.1 → AVX2 →
+AVX-512 VNNI) chosen from CPUID. Every tier computes the *same* exact `i32` value,
+so output never depends on which one ran. No `-C target-cpu` is needed. The crate's
+`rust-version` is 1.89 (the AVX-512 tier needs the intrinsics and `avx512f` target
+feature that became stable there). See [BENCHMARKS.md](BENCHMARKS.md) and
+[doc/performance.md](doc/performance.md).
 
 ### Legacy (original 2018) model
 

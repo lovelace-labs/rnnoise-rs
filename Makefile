@@ -6,7 +6,7 @@
 
 VERSION := $(shell cat VERSION 2>/dev/null || echo 0.0.0)
 
-.PHONY: help build test fmt fmt-check clippy doc check clean
+.PHONY: help build test test-parity fmt fmt-check clippy spell doc deny rt-gate bench bench-dist reference clips features int8-blob check clean
 help: ## Show this help message
 	@awk 'BEGIN{FS=":.*##"; printf "\nrnnoise-rs  v$(VERSION)\n\nTargets:\n"} /^[a-zA-Z_-]+:.*##/{printf "  %-12s %s\n",$$1,$$2}' $(MAKEFILE_LIST)
 	@echo ""
@@ -17,6 +17,10 @@ build: ## cargo build
 test: ## cargo test
 	cargo test
 
+test-parity: ## cargo test against the C reference oracle (see scripts/c_reference.sh)
+	./scripts/c_reference.sh
+	RNNOISE_C_REFERENCE_DIR=.c_reference cargo test --all-features --test c_reference_parity -- --nocapture
+
 fmt: ## cargo fmt
 	cargo fmt --all
 
@@ -24,12 +28,47 @@ fmt-check: ## cargo fmt --check
 	cargo fmt --all --check
 
 clippy: ## cargo clippy with warnings denied
-	cargo clippy --all-targets -- -D warnings
+	cargo clippy --all-targets --all-features -- -D warnings
+
+SPELL_GLOBS = "src/**/*.rs" "tests/**/*.rs" "benches/**/*.rs" "doc/**/*.md" "scripts/*.sh" \
+	"examples/**/*.rs" "include/**/*.h" "Makefile" "README.md" "BENCHMARKS.md" "CHANGELOG.md" \
+	"CONTRIBUTING.md" "AGENTS.md" "SECURITY.md"
+
+spell: ## cspell gate (skips gracefully when cspell is not installed)
+	@if command -v cspell >/dev/null 2>&1; then cspell --no-progress --config cspell.json $(SPELL_GLOBS); else echo "spell: cspell not installed — skipping (run: npx cspell)"; fi
 
 doc: ## cargo doc
 	cargo doc --no-deps
 
-check: fmt-check clippy test ## fmt + clippy + test (the CI gate)
+deny: ## cargo deny (advisories, licenses, bans, sources) — config in deny.toml
+	cargo deny check
+
+bench: ## criterion benchmarks, results saved as a baseline for CI artifacts
+	cargo bench --all-features --bench process -- --save-baseline ci
+
+rt-gate: ## real-time contract gate: the per-frame path must not allocate, lock, do I/O, log or probe CPUID outside dispatch
+	python3 scripts/realtime_gate.py
+
+bench-dist: ## per-frame distribution (mean/p50/p99/p99.9/max) against the 10 ms budget
+	cargo bench --all-features --bench real_time_distribution
+
+reference: ## build the pinned Xiph C reference (scalar _c path) and run the clips
+	./scripts/c_reference.sh
+
+clips: ## regenerate the deterministic test clips in test_data/clips/
+	python3 scripts/make_clips.py
+
+features: ## check every feature combination (the embedding matrix)
+	cargo check --all-targets --no-default-features
+	cargo check --all-targets --no-default-features --features model-loader
+	cargo check --all-targets --no-default-features --features embedded-model-int8
+	cargo check --all-targets --no-default-features --features embedded-model-int8,model-loader
+	cargo test --no-default-features --features model-loader
+
+int8-blob: ## regenerate models/rnnoise_default_int8.bin from the float blob
+	cargo run --release --example gen_int8_blob -- models/rnnoise_default.bin models/rnnoise_default_int8.bin
+
+check: fmt-check clippy spell features test deny rt-gate ## fmt + clippy + spell + feature matrix + test + deny + real-time gate (the CI gate)
 
 clean: ## cargo clean
 	cargo clean

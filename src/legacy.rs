@@ -12,6 +12,8 @@
 //! within ~1e-5 relative energy (imperceptible; the residual is the activation
 //! quantization in the `sdot` path).
 
+// Index loops here mirror the C reference.
+#![allow(clippy::needless_range_loop)]
 use std::sync::{Arc, OnceLock};
 
 use realfft::num_complex::Complex;
@@ -19,12 +21,13 @@ use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
 
 use crate::common::biquad;
 use crate::fft::Cpx;
-use crate::pitch::{pitch_downsample, pitch_search, remove_doubling};
-use crate::weights::ModelError;
-use crate::{
+use crate::params::{
     FRAME_SIZE, FREQ_SIZE, PITCH_BUF_SIZE, PITCH_FRAME_SIZE, PITCH_MAX_PERIOD, PITCH_MIN_PERIOD,
     WINDOW_SIZE,
 };
+use crate::pitch::{pitch_downsample, pitch_search, remove_doubling};
+use crate::simd;
+use crate::weights::ModelError;
 
 const NB_BANDS: usize = 22;
 const CEPS_MEM: usize = 8;
@@ -140,7 +143,10 @@ fn rfft_forward(
     out: &mut [Cpx; FREQ_SIZE],
     wnorm: f32,
 ) {
-    r2c.process_with_scratch(input, spec, scratch).unwrap();
+    // The transform, the spectrum and the scratch buffer are allocated together in
+    // `LegacyState::new`, so a length mismatch here would be a bug in this crate.
+    r2c.process_with_scratch(input, spec, scratch)
+        .expect("rfft forward transform: plan and scratch buffers are built together");
     for (o, c) in out.iter_mut().zip(spec.iter()) {
         o.r = c.re * wnorm;
         o.i = c.im * wnorm;
@@ -161,7 +167,8 @@ fn rfft_inverse(
     // c2r requires the DC and Nyquist bins to be purely real.
     spec[0].im = 0.0;
     spec[FREQ_SIZE - 1].im = 0.0;
-    c2r.process_with_scratch(spec, out, scratch).unwrap();
+    c2r.process_with_scratch(spec, out, scratch)
+        .expect("rfft inverse transform: plan and scratch buffers are built together");
     for v in out.iter_mut() {
         *v *= 0.5;
     }
@@ -230,7 +237,7 @@ fn sigmoid_approx(x: f32) -> f32 {
     0.5 + 0.5 * tansig_approx(0.5 * x)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Act {
     Tanh,
     Sigmoid,
@@ -258,6 +265,7 @@ impl Act {
 
 // --- network ---------------------------------------------------------------
 
+#[derive(Clone, Debug)]
 struct DenseLayer {
     bias: Vec<i8>,
     weights: Vec<i8>, // [nb_inputs][nb_neurons]
@@ -283,6 +291,7 @@ impl DenseLayer {
     }
 }
 
+#[derive(Clone, Debug)]
 struct GruLayer {
     bias: Vec<i8>, // [3*nb_neurons]
     /// Input weights transposed to `[3*nb_neurons][nb_inputs]` so each output is
@@ -334,7 +343,7 @@ impl GruLayer {
         let inv = quantize_dyn(&input[..ni], &mut qx[..ni]);
         let mut in_c = [0.0f32; 3 * MAX_NEURONS];
         for o in 0..3 * n {
-            in_c[o] = crate::nnet::i8_dot(&self.input_weights_t[o * ni..o * ni + ni], &qx[..ni])
+            in_c[o] = crate::simd::i8_dot(&self.input_weights_t[o * ni..o * ni + ni], &qx[..ni])
                 as f32
                 * inv;
         }
@@ -370,6 +379,7 @@ impl GruLayer {
 }
 
 /// The original RNNoise model (dense + 3 GRUs + 2 output heads).
+#[derive(Clone, Debug)]
 pub struct RnnModelV1 {
     input_dense: DenseLayer,
     vad_gru: GruLayer,
@@ -544,6 +554,8 @@ impl RnnStateV1 {
 /// [`crate::DenoiseState`] (480-sample frames, 48 kHz mono), but smaller and
 /// faster at lower quality.
 pub struct DenoiseStateV1 {
+    /// Shared tables, resolved at construction so the frame path never looks them up.
+    common: &'static LegacyCommon,
     model: Arc<RnnModelV1>,
     rnn: RnnStateV1,
     lastg: [f32; NB_BANDS],
@@ -569,14 +581,20 @@ pub struct DenoiseStateV1 {
 
 impl DenoiseStateV1 {
     /// Create a denoiser using a (shared) legacy model.
-    pub fn with_model(model: Arc<RnnModelV1>) -> Self {
-        let _ = legacy_common();
+    ///
+    /// Same contract as [`crate::DenoiseState::new_with_model`]: everything the frame
+    /// path uses — tables, FFT plans, scratch, the feature flags — is built here.
+    #[must_use]
+    pub fn new_with_model(model: Arc<RnnModelV1>) -> Self {
+        let common = legacy_common();
+        simd::warmup();
         let rnn = RnnStateV1::new(&model);
         let mut planner = RealFftPlanner::<f32>::new();
         let r2c = planner.plan_fft_forward(WINDOW_SIZE);
         let c2r = planner.plan_fft_inverse(WINDOW_SIZE);
         let scratch_len = r2c.get_scratch_len().max(c2r.get_scratch_len());
         DenoiseStateV1 {
+            common,
             model,
             rnn,
             lastg: [0.0; NB_BANDS],
@@ -600,6 +618,14 @@ impl DenoiseStateV1 {
         }
     }
 
+    /// Deprecated alias for [`DenoiseStateV1::new_with_model`] (`with_foo()` is
+    /// reserved for closure accessors).
+    #[deprecated(since = "0.2.0", note = "use `new_with_model()`")]
+    #[must_use]
+    pub fn with_model(model: Arc<RnnModelV1>) -> Self {
+        Self::new_with_model(model)
+    }
+
     /// Create a denoiser using the built-in legacy model.
     #[cfg(feature = "legacy-model")]
     pub fn new() -> Self {
@@ -607,13 +633,16 @@ impl DenoiseStateV1 {
         let m = MODEL
             .get_or_init(|| Arc::new(RnnModelV1::default()))
             .clone();
-        Self::with_model(m)
+        Self::new_with_model(m)
     }
 
     /// Denoise one [`FRAME_SIZE`]-sample frame; returns the VAD probability.
+    ///
+    /// Same real-time contract as [`crate::DenoiseState::process_frame`]: nothing is
+    /// allocated, locked or read from the environment; every loop is fixed-size.
     pub fn process_frame(&mut self, output: &mut [f32], input: &[f32]) -> f32 {
         assert!(input.len() >= FRAME_SIZE && output.len() >= FRAME_SIZE);
-        let lc = legacy_common();
+        let lc = self.common;
 
         // Shift input history and high-pass filter the new frame into it.
         let new_idx = PITCH_BUF_SIZE - FRAME_SIZE;
@@ -634,8 +663,8 @@ impl DenoiseStateV1 {
         let mut gf = [1.0f32; FREQ_SIZE];
         let mut vad = [0.0f32];
         if !silence {
-            let model = self.model.clone();
-            self.rnn.compute(&model, &mut g, &mut vad, &self.features);
+            self.rnn
+                .compute(&self.model, &mut g, &mut vad, &self.features);
             self.pitch_filter(&g);
             for i in 0..NB_BANDS {
                 g[i] = g[i].max(0.6 * self.lastg[i]);
@@ -712,7 +741,10 @@ impl DenoiseStateV1 {
         }
         self.features[NB_BANDS + 2 * NB_DELTA_CEPS] -= 1.3;
         self.features[NB_BANDS + 2 * NB_DELTA_CEPS + 1] -= 0.9;
-        self.features[NB_BANDS + 3 * NB_DELTA_CEPS] = 0.01 * (pitch_idx as f32 - 300.0);
+        // Same promotion as the current-model path: `.01` is a `double` in the C reference.
+        // Measured unchanged on `testing.raw` — this path quantizes the GRU input to int8 —
+        // but the rule is the same, so both pipelines mirror the reference.
+        self.features[NB_BANDS + 3 * NB_DELTA_CEPS] = (0.01f64 * (pitch_idx as f64 - 300.0)) as f32;
 
         let mut log_max = -2.0f32;
         let mut follow = -2.0f32;

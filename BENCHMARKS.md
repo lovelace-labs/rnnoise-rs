@@ -29,15 +29,48 @@ Reproducible benchmarks comparing:
 Two complementary measurements:
 
 1. **Per-frame compute (in-process).** Each implementation processes the *same*
-   480-sample frame in a tight loop (20 000 iters after 200 warm-up), so the
-   number is pure steady-state compute, excluding process start-up and I/O. An
-   **active** frame (tone + noise) keeps the NN running; a **silent** frame makes
-   RNNoise skip the network, so `full − front-end ≈ NN cost`.
+   480-sample frame, so the number is pure steady-state compute, excluding process
+   start-up and I/O. An **active** frame (tone + noise) keeps the NN running; a
+   **silent** frame makes RNNoise skip the network, so `full − front-end ≈ NN cost`.
+   The tables below were produced by the tight-loop harness (20 000 iters after 200
+   warm-up); `cargo bench` now measures the same ablation through criterion — see
+   "How `cargo bench` produces the numbers".
 2. **End-to-end CLI wall-clock.** Each tool denoises the same 100 s RAW file;
    we report the **min of 7 runs** (and derive µs/frame and the real-time factor).
    This includes start-up + I/O (small at this length).
 
 All four read/write the same RAW 16-bit 48 kHz mono format.
+
+## How `cargo bench` produces the numbers
+
+`benches/process.rs` is a criterion harness (dev-dependency, `harness = false`): one
+group per implementation — `float`, `int8`, `legacy` — each with an **active** input (tone
++ noise, so the network runs on every frame) and a **silent** input (front-end only,
+network skipped), i.e. the same `full − front-end ≈ NN cost` ablation the tables use.
+
+`make bench` saves a baseline; the CI `bench` job runs
+`cargo bench --all-features -- --save-baseline ci` on x86-64, aarch64 and Apple Silicon
+and uploads `target/criterion` as `bench-<runner>`. Compare numbers **within** an
+artifact, never across runners — they are different machines. Each run prints the tier
+runtime detection selected, so a result is attributable to a kernel path
+(`RNNOISE_SIMD_TIER` is a test-only override and does not apply to benches).
+
+Current run on an x86-64 CI-shape box (tier v3 AVX2, 100 samples), to show what the
+artifacts look like — not the Apple M4 Pro reference numbers above:
+
+| group | active frame | silent frame | NN | NN % | real time |
+|---|--:|--:|--:|--:|--:|
+| `float` | 181.9 µs | 24.8 µs | 157.1 µs | 86 % | 55× |
+| `int8` | 106.0 µs | 24.6 µs | 81.4 µs | 77 % | 94× |
+| `legacy` | 35.9 µs | 21.4 µs | 14.5 µs | 40 % | 279× |
+
+Real time = 10 ms (one 480-sample frame at 48 kHz) divided by the active-frame time.
+
+Why the per-tier matrix matters: on the same box, `RNNOISE_SIMD_TIER=scalar` (with
+`simd-tier-override`) gives **787 µs/frame** for the float path against **181.9 µs** at
+tier v3 — a 4.3× difference that a single benchmark run would hide. The CI `bench` job
+therefore runs `detected`, `avx2` and `scalar` on x86-64 and `detected` and `dotprod` on
+aarch64, each uploaded as its own artifact.
 
 ## Results — per-frame compute (in-process)
 
@@ -74,6 +107,13 @@ by 1 LSB vs the C build).
 **rnnoise-rs's front-end is slower than C's** (35 µs vs 25 µs) — our KISS-FFT
 port and pitch search aren't as tight as upstream's. It's only ~11 % of the
 frame, so it barely moves the total, but it's the clearest remaining target.
+
+That target is now closed on x86-64: with bit-exact SIMD butterflies, the
+cross-correlation tiers and the precomputed band weights, the front-end is
+**21.8 µs** of a **208–216 µs** frame on the AMD Zen 3 core (full frame was
+270.6 µs; int8 116.8 → 102–107 µs). See [doc/performance.md](doc/performance.md)
+for the tier table. These tiers keep the reference accumulation order, so the
+parity numbers above are unchanged.
 
 **nnnoiseless is faster because its model is smaller, not because the code is
 faster.** Its NN is 9.8 µs (old ~215 K-param model, int8, fits in cache) vs our
@@ -141,11 +181,53 @@ opt-in; the float model stays the default. (A naive dequant-to-f32 int8 loop, by
 contrast, measured *0.81×* — slower — confirming the win is the instruction-count
 reduction, not bandwidth.)
 
-### 2. x86 VNNI / `vpdpbusd` — *port the int8 path off ARM (future)*
+### 2. x86 int8 SIMD — ✅ *implemented (SSE2 → SSE4.1 → AVX2 → VNNI, runtime-detected)*
 
-The same int8 design maps to AVX-512-VNNI / AVX-VNNI (`vpdpbusd`) on x86 for an
-equivalent win; only the per-output dot kernel needs an x86 path (the scalar
-fallback already works everywhere).
+`src/simd/` dispatches per architecture. On x86-64 the kernel is
+`pmovsxbw` + `pmaddwd` (runtime AVX2 detection); before that the int8 path had no
+SIMD at all on the SSE2 baseline (`pmaddubsw` is SSSE3) and was **slower than
+float** — 487 vs 289 µs of NN per frame on an AMD Zen 3 core. With the kernel:
+int8 net 487 → **88 µs** (5.6×), full frame 519 → **120 µs** (84× real time),
+legacy 40.2 → 37.8 µs. Still exact int32, so output is unchanged.
+
+`vpdpbusd` (AVX-VNNI / AVX-512-VNNI, 64 MACs per instruction on Zen 4+ / Ice
+Lake+) is now tier v4 of the int8 ladder: it is unsigned × signed, so it needs a biased
+weight domain plus a `128 · Σ q_x` correction (`simd/x86_64/vnni.rs`, asserted exact by
+`simd/tests.rs`), and it is only *used* when CPUID reports `avx512f` + `avx512bw` +
+`avx512vnni` (`set1_epi8`/`add_epi8` are AVX512BW) — which is why `rust-version` is 1.89.
+
+**Measured on a Zen 4 core (Ryzen 7 7800X3D), per row** — same machine, same binary, isolated
+kernel, `m = 384`, `n = 1152` — the tier is faster, and the bias op is not the reason it was
+thought to lose:
+
+| shape | ns/row |
+|---|--:|
+| tier v3 as committed | 17.29 |
+| tier v3, four accumulators | 8.44 |
+| tier v4 as committed (`vpaddb` per chunk, one accumulator) | 4.88 |
+| tier v4, `+128` hoisted out of the loop | 4.77 |
+| tier v4, `+128` hoisted into registers + four accumulators | **3.06** |
+
+`vpdpbusd` does win on this core (≈3.5× tier v3 per row); the `vpaddb` is worth ~2% of a row, and
+the fixed per-row cost (horizontal sum, int→float, scale, store) is ~0.7–1 ns of a ~5 ns row. The
+change that landed is the one the shapes pay for: `quantize()` now stores the per-row `128 · Σ w`
+correction, the activations are biased once per layer, and the 6-chunk hot loop is `load +
+vpdpbusd` only. ARM is unaffected either way: `sdot` is signed × signed and needs no bias.
+
+**Re-measured on the same box, five rounds on one core, min** — an earlier report of tier v4
+being slower than tier v3 was a measurement error. The 114.9 µs / 135.9 µs row it quoted as tier v4 is the *float* path (114.4 / 136.1 on this
+core); its tier v3 row (77.5 / 98.5) is genuine. Tier v4 was never slower than tier v3 here:
+
+| | int8 NN µs/frame | ns/row | full frame |
+|---|--:|--:|--:|
+| tier v4, shape as committed | **45.5** | 5.25 | 66.8 |
+| tier v4, previous shape (`vpaddb` per chunk) | 52.8 | 6.25 | 74.0 |
+| tier v3 (AVX-512 branch forced off) | 78.2 | 9.73 | 99.4 |
+| float path, same binary | 114.4 | — | 136.1 |
+
+The shape change is worth 1.16× end to end, not the 1.37× per row it measures in isolation: the
+isolated kernel keeps 442 KB hot in L2, the model streams 2.8 MB of int8 weights per frame from L3,
+so the crate damps shape ratios. `select` stays top-down (`simd::tier::resolve` is the ladder in one place: top-down by default, capped to what a kernel implements when CI forces a tier).
 
 ### 3. f16 weights + f16 SIMD — *medium win (future)*
 
@@ -175,9 +257,14 @@ custom one) trades some quality for speed and footprint.
 
 ### Recommended priority
 
-int8 + `sdot` (#1) is done and is the big lever on ARM. Next: VNNI for x86 (#2),
-then the real-input FFT (#5) for a broad front-end win; f16 (#3) and threading
-(#4) as needed.
+int8 + `sdot` is done and is the big lever on ARM; the x86 int8 ladder is
+done too, per ISA tier, runtime-detected. The x86 **float** path is at its throughput ceiling: the
+tiers landed, the "3×" acceptance criterion was measured to be unreachable (1.6–1.9× of the
+pre-tier baseline; ≤1.2× for the FMA variant on top of the committed block-major tier), and
+an SSE4.1 float tier would be the SSE2 kernel with a different name — see
+[doc/performance.md](doc/performance.md#fma-and-sse41-on-x86-64-measured-and-not-shipped).
+Next: the real-input FFT for a broad front-end win; f16 and threading as
+needed.
 
 ## Reproduce
 

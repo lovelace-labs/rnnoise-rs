@@ -2,7 +2,7 @@
 name = "rnnoise-rs"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.89"
 license = "BSD-3-Clause"
 description = "Idiomatic Rust port of Xiph RNNoise (current conv+GRU model) for real-time speech noise suppression"
 repository = "https://github.com/lovelace-labs/rnnoise-rs"
@@ -18,7 +18,16 @@ name = "rnnoise"
 crate-type = ["lib", "staticlib", "cdylib"]
 
 [features]
-default = []
+# The default model is embedded, so an app that denoises carries the blob in its binary.
+# Turn `default-features = false` off to carry code only and load a blob at startup.
+default = ["embedded-model"]
+# Embed the float model (11.3 MiB of records): the bit-exact path, matching the C reference.
+embedded-model = []
+# Embed the pre-quantized int8 model (~3.0 MiB instead of 11.3 MiB). Not bit-exact; see
+# doc/models.md. If both embedded features are enabled, `embedded-model` wins.
+embedded-model-int8 = []
+# Load a model from a file: `RnnModel::from_file` / `from_file_with_checksum`. Embeds nothing.
+model-loader = []
 # Expose a C ABI matching rnnoise.h (DenoiseState / rnnoise_process_frame ...).
 capi = []
 # Also bundle the original (2018) RNNoise model: a smaller, faster, lower-quality
@@ -26,21 +35,43 @@ capi = []
 # `realfft` (rustfft) for the front-end FFT — the same fast FFT `nnnoiseless`
 # uses — so the legacy model is faster than `nnnoiseless`.
 legacy-model = ["dep:realfft"]
+# Opt-in, dev/CI only: honours `RNNOISE_SIMD_TIER` in a normal build so a specific
+# kernel path can be exercised and measured. Costs one cached lookup per matmul call,
+# so it is never enabled by default and never part of the shipping API.
+simd-tier-override = []
 
 [dependencies]
 realfft = { version = "3", optional = true }
 
 [dev-dependencies]
+# Benchmark harness for `cargo bench`: the CI job saves a baseline and
+# uploads the JSON as an artifact. Dev-only, so it never reaches a crate user.
+criterion = "0.5"
 
 [[bin]]
 name = "rnnoise-demo"
 path = "src/bin/rnnoise_demo.rs"
+# Needs a model without being handed one, so it needs an embedded blob.
+required-features = ["embedded-model"]
 
 [[bench]]
 name = "process"
 harness = false
+required-features = ["embedded-model"]
+
+# The real-time view: per-frame distribution (mean/p50/p99/p99.9/max) against the 10 ms
+# frame budget. See doc/realtime.md.
+[[bench]]
+name = "real_time_distribution"
+harness = false
+required-features = ["embedded-model"]
 
 [profile.release]
 opt-level = 3
 lto = true
 codegen-units = 1
+
+# Unsafe code is confined to the SIMD, FFT and C ABI modules, which opt in with
+# `#[allow(unsafe_code)]`.
+[lints.rust]
+unsafe_code = "deny"

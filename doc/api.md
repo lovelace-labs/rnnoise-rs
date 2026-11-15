@@ -33,17 +33,24 @@ same stream.
 
 ```rust
 let mut st = DenoiseState::new();              // built-in model
-// or: DenoiseState::with_model(model)         // a shared Arc<RnnModel>
+// or: DenoiseState::new_with_model(model)      // a shared Arc<RnnModel>
 
 let vad: f32 = st.process_frame(&mut out, &inp); // out,inp: &[f32] ≥ FRAME_SIZE
 ```
 
 - `new()` / `Default` — use the embedded default model (shared across instances;
   parsed once).
-- `with_model(model: Arc<RnnModel>)` — back the denoiser with a specific model.
+- `new_with_model(model: Arc<RnnModel>)` — back the denoiser with a specific model.
+  (`with_model()` is the old name, kept as a deprecated alias: `with_foo()` is reserved
+  for closure accessors.)
 - `process_frame(&mut self, output, input) -> f32` — denoise one frame; returns
   the voice-activity probability in `[0, 1]`. `output` and `input` must each be at
   least `FRAME_SIZE` long (longer slices: only the first `FRAME_SIZE` are used).
+- `rnnoise::warmup()` — resolve the runtime CPU feature flags now instead of on the first
+  call. `new_with_model()` already does it, so a caller that builds its state outside the
+  audio callback does not need to call this; it exists for callers that construct the state
+  inside the callback, or that want the one-time probe attributable to startup. It changes
+  no output. See [realtime.md](realtime.md).
 
 ### Streaming whole signals
 
@@ -73,18 +80,37 @@ fn denoise(samples: &[f32]) -> Vec<f32> {
 The immutable weights, shared across denoisers.
 
 ```rust
-let model = RnnModel::default();                       // the embedded model
+let model = RnnModel::default();                       // the embedded model (features)
 let model = RnnModel::from_bytes(&blob)?;              // a custom weight blob
+let model = RnnModel::from_file(Path::new("m.bin"))?;  // `model-loader` feature
 let fast  = RnnModel::default().quantized();           // int8 variant (see below)
+let bytes = model.to_bytes();                          // the mirror of from_bytes
 ```
 
-- `default()` — parse the embedded default model (panics only if the embedded
-  blob is somehow invalid, which is a build error, not a runtime one).
-- `from_bytes(&[u8]) -> Result<RnnModel, ModelError>` — load an upstream RNNoise
-  weight blob (the `"DNNw"` format produced by `dump_weights_blob`). See
+- `default()` — parse the embedded model. Only exists with `embedded-model` or
+  `embedded-model-int8`; the float blob wins when both are enabled, because feature
+  unification can enable both without anyone asking. Panics only if the embedded blob is
+  invalid, which is a build-time problem, not a runtime one.
+- `from_bytes(&[u8]) -> Result<RnnModel, ModelError>` — load an upstream RNNoise weight
+  blob (the `"DNNw"` format produced by `dump_weights_blob`), bare or inside the `RNNS`
+  container, whose format version, record count and checksum are verified. See
   [models.md](models.md).
+- `from_file(path)` and `from_file_with_checksum(path, expected_crc)`
+  (`model-loader` feature) — the on-demand path for an application that ships no embedded
+  blob. The pinned-checksum form is what catches a structurally plausible but wrong file;
+  a CRC32 is a corruption check, not an authenticity check. Both are startup paths: they
+  allocate and perform I/O, so they are not real-time-safe and must not run on the audio
+  thread. An existing memory mapping already works with no extra API: `from_bytes(&mmap)`.
+- `crc32(&[u8]) -> u32` — the CRC32 (IEEE, reflected) the container uses, exposed so a
+  caller can pin a downloaded blob before parsing it.
+- `to_bytes() -> Vec<u8>` — serialise the model as the `RNNS` container plus its records;
+  round-trips through `from_bytes`.
 - `quantized(self) -> RnnModel` — return an int8-quantized copy: ~4× smaller and
   ~3× faster, audibly identical, **not** bit-exact. See [models.md](models.md#int8-quantized-model).
+
+`ModelError` is `#[non_exhaustive]`: `Malformed`, `MissingArray`, `BadSize`, `BadType`,
+`UnsupportedVersion`, `ChecksumMismatch { expected, actual }`, `RecordCountMismatch`,
+`NoEmbeddedModel`, `Io`.
 
 ### Sharing a model across streams / threads
 
@@ -94,8 +120,8 @@ let fast  = RnnModel::default().quantized();           // int8 variant (see belo
 ```rust
 use std::sync::Arc;
 let model = Arc::new(RnnModel::default().quantized());
-let mut a = DenoiseState::with_model(model.clone());
-let mut b = DenoiseState::with_model(model);  // shares the same weights, no copy
+let mut a = DenoiseState::new_with_model(model.clone());
+let mut b = DenoiseState::new_with_model(model);  // shares the same weights, no copy
 ```
 
 This is the recommended pattern for many concurrent streams: the weights are
@@ -139,7 +165,7 @@ let mut st = DenoiseStateV1::new();                 // embedded legacy weights
 let v = st.process_frame(&mut out, &inp);
 
 let model = std::sync::Arc::new(RnnModelV1::from_bytes(&blob)?); // custom legacy weights
-let mut st = DenoiseStateV1::with_model(model);
+let mut st = DenoiseStateV1::new_with_model(model);
 # Ok::<(), rnnoise::ModelError>(()) }
 ```
 

@@ -88,12 +88,44 @@ nnnoiseless 0.32 s (smaller/older model). The NN is 89 % of each frame and is
 
 ## Future enhancements (not required for parity)
 
-- [ ] **x86 int8 SIMD** (AVX-VNNI `vpdpbusd`): port the int8 dot kernel off ARM
-      (scalar fallback already works everywhere); same ~3–4× win as `sdot`.
+- [x] **x86-64 int8 SIMD** (`pmovsxbw` + `pmaddwd`, runtime AVX2 detection) in
+      `src/simd/`: on an AMD Zen 3 core the int8 neural net went 487 → 88 µs/frame
+      (5.6×; full frame 519 → 120 µs) — previously x86 had no int8 dot kernel and
+      int8 was *slower* than float. Exact int32, so results match the scalar path
+      bit for bit.
+- [x] **AVX2 float GEMV tier** (`simd/x86_64/dense.rs`) plus loading *complete ascending*
+      sparse indices in dense row-major form (`weights.rs`) — the shipped model's GRU
+      matrices qualify, so they run through the wider tier with provably identical
+      accumulation order. Float NN 239 → 192 µs/frame on Zen 3.
+- [x] **AVX-VNNI / AVX-512-VNNI (`vpdpbusd`)** for Zen 4+ / Ice Lake+: unsigned ×
+      signed, so it needs a biased weight domain plus a `128 · Σ q_x` correction
+      (`simd/x86_64/vnni.rs`, tier v4, the bias identity asserted in `simd/tests.rs`);
+      used only when CPUID reports `avx512f` + `avx512vnni`, which is why `rust-version`
+      is 1.89. Not measurable on the Zen 3 box.
+- [x] **FMA and SSE4.1 float tiers** —
+      measured and closed without shipping code. On the Zen 3 core the float ladder is at its
+      throughput ceiling: explicit `avx2 + fma` kernels give ≤1.2× on the row-major shapes
+      (384×1152: 43.98 → 35.93 µs) and nothing on the block-major ones where the GRUs run,
+      so end to end there is no measurable gain (float full frame 159.1 vs 160.5 µs, min of
+      six alternating rounds). FMA is also not bit-exact (≤1 ULP per step, ~1e-5 absolute
+      worst case on a cancellation-heavy depth-384 sum), which the parity rule does not allow
+      as a default path. SSE4.1 adds no `f32` width over SSE2, so there is nothing to write.
+      The "3×" target measures **1.6–1.9×** against the pre-tier baseline. Full
+      numbers in [doc/performance.md](doc/performance.md).
 - [ ] **f16 weights + f16 SIMD** (~1.5–2× on ARM); less accuracy loss than int8.
 - [ ] Multi-thread the per-layer GEMVs across cores (best for offline/batch).
-- [ ] Tighten the front-end (real-input FFT) to close the ~10 µs gap to C.
-- [ ] Ship a pre-quantized int8 / "little" model blob behind a feature so the
-      crate fits the crates.io 10 MB limit (default float blob is 11.3 MB).
+- [x] Tighten the x86-64 front-end: bit-exact SIMD butterflies (`fft/x86_64.rs`),
+      bit-exact cross-correlation tiers (`simd/x86_64/xcorr.rs`) and a precomputed band
+      weight table. Front-end 31.6 → 21.8 µs/frame on Zen 3. A *real-input* FFT would
+      halve the transform again but changes rounding, so it is left as a separate,
+      explicitly opt-in lever.
+- [x] Ship a pre-quantized int8 blob behind a feature (`embedded-model-int8`, 3.0 MiB)
+      so the crate fits the crates.io 10 MB limit; embedding is now optional
+      (`embedded-model` default, `model-loader` for on-demand loading).
+- [ ] Raise the crates.io size limit for a published crate that keeps `embedded-model`
+      as its default feature (the float blob is 11.3 MiB), or publish with the int8 blob
+      as the packaged default. Decision, not code: it changes what a default build is.
+- [ ] Optional `memmap2` feature for the loader (peak RSS and cross-process page sharing)
+      — needs a cause; `from_bytes(&mmap)` already works with a caller-owned mapping.
 - [ ] `cargo-c` packaging / pkg-config for the C ABI; optional WAV I/O in the CLI.
 - [ ] Big-endian support in the blob loader (currently little-endian).

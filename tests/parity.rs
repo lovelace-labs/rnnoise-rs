@@ -1,12 +1,15 @@
 //! End-to-end parity against the upstream C reference (`rnnoise_demo`, scalar
 //! build) on `test_data/testing.raw`. The reference output was produced with
 //! the same float model embedded here.
+#![cfg(feature = "embedded-model")]
 
 use rnnoise::{DenoiseState, FRAME_SIZE};
 
 fn load_i16(bytes: &[u8]) -> Vec<i16> {
     bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| i16::from_le_bytes([c[0], c[1]]))
         .collect()
 }
@@ -20,7 +23,7 @@ fn matches_c_reference() {
     let mut out_buf = [0.0f32; FRAME_SIZE];
     let mut output: Vec<f32> = Vec::new();
     let mut first = true;
-    for chunk in input.chunks_exact(FRAME_SIZE) {
+    for chunk in input.as_chunks::<FRAME_SIZE>().0.iter() {
         let frame: Vec<f32> = chunk.iter().map(|&s| s as f32).collect();
         st.process_frame(&mut out_buf, &frame);
         if !first {
@@ -56,10 +59,15 @@ fn matches_c_reference() {
         rel
     );
 
-    // Far tighter than nnnoiseless's 1e-4 acceptance; differences are limited to
-    // a handful of 1-LSB roundings vs the C build (see TODO.md parity notes).
+    // Far tighter than nnnoiseless's 1e-4 acceptance. `test_data/ref_out.raw` is produced by
+    // the pinned pure-C recipe in `scripts/c_reference.sh`, and the port reproduces it byte
+    // for byte, so the gate is equality: a differing sample here is a DSP change that has to
+    // be justified against the reference, not a rounding to be tolerated.
     assert!(rel < 1e-6, "relative energy diff too large: {rel:.3e}");
-    assert!(max_diff <= 2, "max sample diff too large: {max_diff}");
+    assert_eq!(
+        nonzero, 0,
+        "port differs from the pinned golden: {nonzero} samples, max {max_diff}"
+    );
 }
 
 #[test]
@@ -69,11 +77,11 @@ fn quantized_accuracy() {
     let input = load_i16(include_bytes!("../test_data/testing.raw"));
     let reference = load_i16(include_bytes!("../test_data/ref_out.raw"));
     let model = Arc::new(RnnModel::default().quantized());
-    let mut st = DenoiseState::with_model(model);
+    let mut st = DenoiseState::new_with_model(model);
     let mut out_buf = [0.0f32; FRAME_SIZE];
     let mut output: Vec<f32> = Vec::new();
     let mut first = true;
-    for chunk in input.chunks_exact(FRAME_SIZE) {
+    for chunk in input.as_chunks::<FRAME_SIZE>().0.iter() {
         let frame: Vec<f32> = chunk.iter().map(|&s| s as f32).collect();
         st.process_frame(&mut out_buf, &frame);
         if !first {

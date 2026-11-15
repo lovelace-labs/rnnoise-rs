@@ -1,0 +1,38 @@
+# cargo-deny configuration. Gate: `make deny` and the `deny` CI job.
+#
+# The library has no runtime dependencies by default; the optional ones are `realfft`
+# (`legacy-model`) and the dev-dependency `criterion`. Checks are kept narrow so they
+# fail on real problems, not on noise.
+
+[advisories]
+version = 2
+# An ignore here is a decision, not an accident: keep the RUSTSEC id plus a one-line
+# reason.
+ignore = []
+
+[licenses]
+version = 2
+# The crate is BSD-3-Clause, so the graph must stay compatible with shipping a BSD-3
+# library: permissive licenses only, copyleft denied.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "BSD-2-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-DFS-2016",
+    "CC0-1.0",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

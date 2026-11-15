@@ -21,6 +21,7 @@ snippet, see the top-level [`README.md`](../README.md); for live API docs run
 | [internals.md](internals.md) | A module-by-module deep dive for contributors: FFT, bands, pitch, the neural net, weight loading and the pipeline. |
 | [parity.md](parity.md) | How "numerically equivalent to upstream" is defined, measured and tested, and the exact results. |
 | [performance.md](performance.md) | Throughput, the memory/compute profile, the SIMD/quantization optimizations, and how to reproduce the numbers. See also [`BENCHMARKS.md`](../BENCHMARKS.md). |
+| [realtime.md](realtime.md) | The real-time contract: no allocation, no lock, no I/O and bounded work per frame, what tests and the source gate enforce, and what is explicitly not guaranteed. |
 | [building.md](building.md) | Building, features, the CLI demo, the C/staticlib/cdylib artifacts, and CI. |
 
 ## At a glance
@@ -37,6 +38,10 @@ snippet, see the top-level [`README.md`](../README.md); for live API docs run
   real time — faster than `nnnoiseless`.
 - **Dependencies:** none for the default build. The only `unsafe` is the
   optional C ABI and the optional NEON `sdot` kernel.
+- **Real-time contract:** after construction, `process_frame` allocates nothing, locks
+  nothing, does no I/O, logs nothing, and does fixed-size work per frame — enforced by
+  `tests/real_time_no_alloc.rs` and `scripts/realtime_gate.py`. Per-frame percentiles, not
+  only means: see [realtime.md](realtime.md).
 
 ## Provenance & license
 

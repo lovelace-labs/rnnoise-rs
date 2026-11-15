@@ -5,21 +5,60 @@ it, and how to reproduce the numbers. For the full benchmark tables and
 methodology see [`BENCHMARKS.md`](../BENCHMARKS.md).
 
 All figures are Apple M4 Pro, single core, `opt-level=3, lto=true,
-codegen-units=1`. Per-frame is the steady-state cost of one `process_frame`;
+codegen-units=1`, except the x86-64 rows, which are an AMD Ryzen 9 5900X (Zen 3)
+with plain `cargo bench` — i.e. the default `x86-64` (SSE2) codegen baseline plus
+runtime feature detection, no `-C target-cpu`. Per-frame is the steady-state cost of one `process_frame`;
 "real time" is how many times faster than the 10 ms a frame represents.
+
+The Zen 3 figures are a head-to-head against the pre-SIMD baseline commit
+[`74b46b1`](https://github.com/lovelace-labs/rnnoise-rs/commit/74b46b1065630f68464ee60dd542e3ce175743db):
+same harness file, same deterministic bench frame, same toolchain (rustc 1.99.1),
+one core pinned, the two builds run alternating in the same session, means of four
+rounds. Run-to-run spread is ~5 %, so read these as ratios.
 
 ## Summary
 
 | Configuration | per frame | real-time | notes |
 |---|--:|--:|---|
 | current model, float (default) | ~312 µs | ~32× | bit-exact with C, zero deps |
-| current model, int8 + `sdot` | ~105 µs | ~95× | opt-in, audibly identical |
-| legacy model (`legacy-model`) | ~26 µs | ~309× | **faster than `nnnoiseless`** |
+| current model, int8 + `sdot` (aarch64) | ~105 µs | ~95× | opt-in, audibly identical |
+| current model, int8 + `pmaddwd` (x86-64, Zen 3) | ~100 µs | ~100× | runtime-detected AVX2; **4.9× vs the baseline** (which had no x86 int8 kernel at all) |
+| current model, float, x86-64 Zen 3 | ~157 µs | ~63× | **1.36×** vs `4a26f93`, **1.64×** vs the baseline; see the x86-64 sections below |
+| legacy model (`legacy-model`), M4 Pro | ~26 µs | ~309× | **faster than `nnnoiseless`** |
+| legacy model, x86-64 Zen 3 | ~33 µs | ~299× | **1.21×** vs the baseline |
 | — `nnnoiseless` (same old model) | ~28 µs | ~290× | for reference |
 
 The current model is ~13× larger than the old one, so it cannot match the tiny
 old model on raw throughput — but it denoises far better, and it runs faster than
 the official C library (~1.5× on the same model; see [BENCHMARKS.md](../BENCHMARKS.md)).
+
+## Per-frame distribution
+
+A real-time callback is bounded by its worst frame, not its average one, so
+`make bench-dist` (`cargo bench --all-features --bench real_time_distribution`) reports the
+distribution: three runs of 20 000 frames after a 200-frame warm-up, each frame timed
+individually on the Zen 3 core (`Instant`, ~30–50 ns of overhead included), single thread, no
+real-time scheduling; the table is the mean of the three runs.
+
+| path | mean | p50 | p99 | p99.9 | max | headroom on the 10 ms budget (mean / max) |
+|---|--:|--:|--:|--:|--:|--:|
+| float (default) | 179.0 µs | 171.1 | 288.8 | 777.5 | **1525.8 µs** | 55.9× / 6.6× |
+| int8 quantized | 107.2 µs | 102.3 | 175.3 | 304.8 | **1876.7 µs** | 93.3× / 5.3× |
+| legacy (`legacy-model`) | 35.6 µs | 33.9 | 54.3 | 88.5 | **1013.3 µs** | 280.9× / 9.9× |
+
+The per-frame work itself is fixed-size (no unbounded loop, no allocation, no lock), so
+the p99.9/max tail is scheduler and page-fault noise rather than the algorithm. Cold start
+is measured separately because it is not part of the frame path: in a fresh process,
+construction ≈ 21.3 ms (tables, weight parse, the one-time CPUID probe) and the first frame
+≈ 1.06 ms; from frame 2 on, 0 allocations. The contract and how it is enforced are in
+[realtime.md](realtime.md).
+
+The per-frame work itself is fixed-size (no unbounded loop, no allocation, no lock), so
+the p99.9/max tail is scheduler and page-fault noise rather than the algorithm. Cold start
+is measured separately because it is not part of the frame path: in a fresh process,
+construction ≈ 14.3 ms (tables, weight parse, the one-time CPUID probe) and the first frame
+≈ 585 µs; from frame 2 on, 0 allocations. The contract and how it is enforced are in
+[realtime.md](realtime.md).
 
 ## Where the time goes
 
@@ -61,33 +100,303 @@ Key lesson — because the workload is instruction-bound, *how* you do int8 matt
 
 `sdot` is emitted via stable inline `asm!` (the `vdotq_s32` intrinsic is still
 nightly-only), guarded by runtime `is_aarch64_feature_detected!("dotprod")`, with
-a scalar fallback that yields the identical integer result. Non-aarch64 targets
-use the scalar path automatically.
+a scalar fallback that yields the identical integer result.
 
-### Beating `nnnoiseless` on the legacy model
+### x86-64 float tiers (parity-safe, runtime-detected)
 
-The legacy model started ~45 µs (with the KISS-FFT) and is now ~26 µs — faster
-than `nnnoiseless`'s ~28 µs — via three changes:
+The int8 tiers only help the quantized model, so the float path used to run at the
+plain `x86-64` (SSE2, 4-lane) codegen rate even on an AVX2 machine. `src/simd` now has
+float tiers for the three hot DSP/DNN loops, each of them **bit-identical to the portable
+reference** because it keeps the reference's accumulation order and never fuses a multiply
+with an add (no `vfmadd` appears in the disassembly). *Bit-identical to the reference as it
+stands today*: the sparse 8×4 commit also re-grouped the reference itself, which moves a
+couple of 1-LSB roundings relative to the baseline — see the head-to-head section below.
 
-1. **`realfft` (rustfft) for the FFT.** The from-scratch KISS-FFT is ~2× slower
-   per transform than rustfft; matching nnnoiseless's FFT closed most of the gap.
-   `realfft` is an optional dependency, gated to the `legacy-model` feature, so the
-   default crate stays dependency-free and the current model keeps its bit-exact
-   KISS-FFT.
-2. **Tighter pitch:** a 4-lags-at-once `pitch_xcorr` and 4-wide inner products.
-3. **`sdot` int8 GRU input matmuls** with dynamically-quantized activations — the
-   decisive edge nnnoiseless doesn't have (it makes the NN faster while keeping the
-   low-memory int8 weights).
+| kernel | what the tier does | measured on a Zen 3 core |
+|---|---|--|
+| `simd/x86_64/dense.rs` | 8 outputs per accumulator instead of 4 | 384×1152 layer 33.2 → 23.5 µs/frame |
+| `simd/x86_64/xcorr.rs` | 4 (SSE2) / 8 (AVX2) lags in parallel, one accumulator per lag | coarse pitch search 7.2 → 3.0 µs/frame |
+| `fft/x86_64.rs` | vector butterflies over the inner `j`, reading per-stage contiguous twiddle views built by the plan | 4.86 → 2.5 µs per transform (3 per frame) |
 
-Fair head-to-head (standalone, isolated processes, median of many runs):
-**rnnoise-rs ~26 µs vs nnnoiseless ~28 µs (~7 % faster).**
+Two structural changes make those tiers pay off:
+
+- **Complete sparse indices are dense-equivalent.** The shipped model's GRU matrices are
+  stored in the sparse 8×4 layout, but every row group lists all `nb_inputs/4` blocks in
+  ascending order. The walk then visits each output's contributions in ascending input
+  order — exactly `dense_sgemv`'s order — so `weights.rs` loads such layers in dense
+  row-major form at parse time (same bytes, same bits) and the GEMV can run through the
+  wider tier. Out-of-order or genuinely sparse blobs keep the sparse kernel.
+- **Band weights are precomputed** in `Common` (`j / band_size`, the same f32 division as
+  the runtime did), removing ~317 float divisions per band pass.
+
+End to end, plain `cargo bench`, tier v3 selected at runtime (best of runs):
+
+| | before | after |
+|---|--:|--:|
+| float full frame | 270.6 µs | **208–216 µs** (46–48× real time) |
+| — float front-end | 31.6 µs | **21.8 µs** |
+| int8 full frame | 116.8 µs | **102–107 µs** (94–98× real time) |
+| legacy full frame | 38.1 µs | **33.8 µs** |
+
+Cross-check, same machine, four alternating rounds against the baseline commit (means,
+not best of runs): float `305.2 → 205.2 µs`, front-end `31.4 → 21.7 µs` — see
+[Head-to-head](#head-to-head-against-the-pre-simd-baseline-74b46b1).
+
+Parity is unchanged by all of this (3 / 47 520 samples, 1 LSB, `2.003e-10` as measured then;
+0 now, see [parity.md](parity.md), because the `.01` pitch feature is computed in double like
+the reference), which is the point of keeping the accumulation order: the tiers are a layout
+and width change, not an arithmetic change. Aarch64 keeps the portable reference for these loops, so its numbers
+are unchanged.
+
+### x86-64 int8 tiers (parity-safe, runtime-detected)
+
+Before this, x86-64 had no int8 dot kernel at all: on the `x86-64` baseline codegen
+(`SSE2`) a byte dot product cannot be vectorized — `pmaddubsw` is SSSE3 and
+`vpdpbusd` is VNNI — so the int8 path was **slower** than float (487 vs 289 µs of
+NN per frame).
+
+`src/simd/x86_64/` now has one kernel per ISA tier, chosen at **runtime** by CPUID
+(`src/simd/x86_64/select.rs`), once per matmul call, never through `-C target-cpu`:
+
+| tier | ISA | kernel | MACs/cycle on this Zen 3 core |
+|---|---|---|--:|
+| v1 | SSE2 (x86-64 baseline) | `punpcklbw` + `cmpgt` sign mask + `pmaddwd` | 3.5 |
+| v2 | SSE4.1 (x86-64-v2) | `pmovsxbw` + `pmaddwd` | 6.5 |
+| v3 | AVX2 (x86-64-v3) | same shape, 16 lanes | **15.3** |
+| v4 | AVX-512 VNNI (x86-64-v4) | `vpdpbusd`, unsigned × signed; `+128` paid once per layer, per-row `128 · Σ w` correction | 27.3 on the Zen 4 core (17.1 before the shape change) |
+
+The same idea applies to the sparse 8×4 GEMV: `x86_64/sparse8x4.rs` keeps the
+eight-row accumulator in a ymm register for the whole row group instead of
+reloading and storing it per block, and accumulates per column in the order
+upstream `vec.h` uses, so it is bit-identical to `scalar::sparse_sgemv8x4`.
+
+End to end, plain `cargo bench`, tier v3 selected at runtime:
+
+| | before | after |
+|---|--:|--:|
+| int8 neural net | 487 µs | **84 µs** (5.8×) |
+| int8 full frame | 519 µs | **119 µs** (84× real time) |
+| legacy full frame | 40.2 µs | 38.1 µs |
+
+Cross-check, same machine, four alternating rounds against the baseline commit (means):
+int8 `509.5 → 104.3 µs` full frame, `477.9 → 82.6 µs` neural net, legacy `40.4 → 33.4 µs`.
+At the baseline int8 was *slower* than float (0.58×), so the ladder is the whole
+story for x86.
+
+Tier v4 is available on Rust ≥ 1.89 (AVX-512 intrinsics + `avx512f` target feature),
+which is why the crate's `rust-version` is 1.89. It does not force AVX-512 codegen:
+a binary built with 1.89+ runs tier v3 on an AVX2-only CPU and v4 on a Zen 4. `select`
+checks `avx512f` + `avx512bw` + `avx512vnni`, because the kernel's `set1_epi8`/`add_epi8`
+are AVX512BW instructions. `/proc/cpuinfo` prints the flags with mixed spellings — `avx512f`,
+`avx512bw`, `avx512_vnni` on the Zen 4 box — which is why the CI coverage step accepts both forms,
+since a skipped tier is not coverage.
+
+**Tier v4 on an actual Zen 4 core (Ryzen 7 7800X3D), measured.** An earlier measurement reported tier v4 as
+slower than tier v3 end to end (114.9 µs of network vs 77.5 µs, one run each) and blamed the
+per-chunk `vpaddb`. Per row — same machine, same binary, isolated kernel, the model's hot width
+(`m = 384`, `n = 1152`) — the picture is different:
+
+| shape | ns/row | MACs/cycle |
+|---|--:|--:
+| tier v3 as committed | 17.29 | 4.8 |
+| tier v3, four accumulators | 8.44 | 9.9 |
+| tier v4 as committed (`vpaddb` per chunk, one accumulator) | 4.88 | 17.1 |
+| tier v4, `+128` hoisted out of the loop | 4.77 | 17.5 |
+| tier v4, `+128` hoisted into registers, four accumulators | **3.06** | **27.3** |
+
+So the ladder's top-down assumption is not what was wrong: on this core tier v4 is ~3.5× tier v3
+per row, and the bias instruction is worth about 2% of a row, not 1.48×. The fixed per-row part
+(horizontal sum + int→float + scale + store) fits to 0.7–1 ns of a ~5 ns row — real, as that report
+suspected, but not the story. What is worth something is the load port: 6 activation loads per row
+are the same size as 6 weight loads, and keeping the biased activations in registers removes them.
+
+Landed here: `quantize()` stores the per-row `128 · Σ w` correction, the activations are biased once
+per layer at the top of the call, and the hot path — every quantized layer in the model is 384
+bytes, exactly 6 chunks — runs `load + vpdpbusd` only, with four independent accumulator chains
+because one `vpdpbusd` chain costs more than the tier's throughput. Still exact integer arithmetic,
+so tier v4 remains bit-identical to the reference. Four accumulators on **tier v3** measured 2× in
+isolation and no gain at the level the crate runs (`83.4 µs` vs `84.9 µs` of network per frame,
+median of three runs, Zen 3), so tier v3 keeps one accumulator.
+
+**Re-measured on the same box at the level the crate runs**, five rounds on one core, min, same
+toolchain:
+
+| build | tier `select` picks | int8 NN µs/frame | ns/row | full frame |
+|---|---|--:|--:|--:|
+| tier v4 as it now is (bias hoisted into registers, 4 accumulators) | v4 | **45.5** | 5.25 | 66.8 |
+| tier v4 as previously measured (`vpaddb` per chunk, 1 accumulator) | v4 | 52.8 | 6.25 | 74.0 |
+| tier v3 (AVX-512 branch forced off) | v3 | 78.2 | 9.73 | 99.4 |
+| float path, same box, same binary | — | 114.4 | — | 136.1 |
+
+So the report's premise was a measurement error, not an ISA fact: the 114.9 µs / 135.9 µs attributed to
+tier v4 are the **float path's** numbers (114.4 / 136.1 on the same core, within noise) — its
+tier v3 row (77.5 / 98.5) does match the AVX2 tier. Tier v4 was never slower than tier v3 on this
+core; it was 52.8 vs 78.2 µs at the old shape and 45.5 vs 78.2 at the committed one. The ladder
+stays top-down, so `select` does not get a per-ISA table.
+
+One methodological point for the tier tables: an isolated kernel and the crate do not measure the
+same thing. The shape ratios above are real, but the crate damps them — a 37% per-row shape gain
+came out as 16% end to end, because the isolated kernel keeps 442 KB hot in L2 while the model
+streams 2.8 MB of int8 weights per frame from L3. Per-row numbers in this doc must say which level
+they were taken at.
+
+Every int8 tier produces the **same exact integer** (products and pair sums fit in `i32`
+for the model's widths), so the quantized output is unchanged — the accuracy test
+still reports `rel_energy 4.826e-6`, and `src/simd/tests.rs` asserts tier == scalar
+for every tier the CPU reports, skipping the others. The VNNI bias identity
+(`Σ u8(x+128)·w − 128·Σ w == Σ x·w`) is also unit-tested in pure Rust, so it is checked
+even on runners without AVX-512.
+
+### Block-major dense float GEMV (parity-safe, x86-64 tier)
+
+In the row-major GEMV each output keeps its own accumulator, so a group of eight outputs
+costs a load and a store of that accumulator on top of the multiply and add: 2 loads + 1
+store + 2 FP ops per 8 MACs. Storing the same values **grouped per output block** — eight
+outputs' weights contiguous over `j` — lets the tier keep the accumulator in a register for
+the whole `j` walk, and running four groups at once puts four independent add chains in
+flight. It is a permutation of the same floats, and every output still sums in ascending
+`j`, so the bits are identical: `rnnoise-demo` on `test_data/testing.raw` outputs the same
+bytes as before the change, and the parity harness reports the same numbers.
+
+Measured on a Zen 3 core (same toolchain, one core pinned, isolated layer call):
+
+| layer shape | row-major | block-major | ratio |
+|---|--:|--:|--:|
+| 384×1152 (the GRU matrices) | 20.7 µs | 15.3 µs | 1.35× |
+| 384×384 (conv2) | 12.5 | 6.6 | 1.9× |
+| 195×128 (conv1) | 2.2 | 0.8 | 2.7× |
+| 1536×32 (dense_out) | 5.0 | 1.4 | 3.6× |
+
+End to end, five alternating rounds (the comparison build is the committed tree, tier v3
+selected at runtime):
+
+| | before | after |
+|---|--:|--:|
+| float full frame | 213.5 µs | **157.4 µs** (46.8× → 63.5× real time) |
+| — float neural net | 192.0 µs | **135.7 µs** (1.41×) |
+| — float front-end | 21.5 µs | 21.7 µs (unchanged) |
+| int8 full frame | 102.8 µs | 99.5 µs (layout does not apply: its dot is already contiguous per output) |
+| end-to-end CLI, 100 s, min of 5 | 2.131 s | **1.593 s** (1.34×) |
+
+Without a fused multiply-add the ceiling is 8 MACs/cycle (one 32-byte weight load plus one
+mul and one add per group of eight). The row-major shape reaches ~5.1, the block shape ~6.7,
+so the float GEMV is now within about 20% of what this core can do; the only remaining step
+is FMA, which changes the rounding per step and is therefore not allowed by the parity
+bound — and, measured below, is not worth taking.
+
+### FMA and SSE4.1 on x86-64: measured, and not shipped
+
+Hand-written SSE4.1 and
+AVX2 + FMA float kernels were considered, with runtime detection and a target of "at least 3× faster than
+the x86 float path". Runtime detection and the
+AVX2 float tiers are done (above); the rest was measured on this core and closed without
+shipping code, for three reasons.
+
+**The 3× target is not reachable.** The float GEMV
+is instruction-throughput bound, not cache bound: with an L1-resident matrix the plain tier
+does 4.0 MACs/cycle, the best 4-chain FMA build 6.4–7.6 → **1.6–1.9×**, not 3×. Separately,
+the frame streams 11.3 MB of float weights at ~45 GB/s, i.e. the per-core L3 ceiling, so 3×
+would need weight reuse across streams (batch: measured 1.19× on one core, it pays only when
+several cores are bandwidth-bound) or fewer bytes per MAC (int8 — already; int4 — at a
+quality cost). So the criterion is closed at ~1.6–1.9× of the *pre-tier* baseline.
+
+**On top of the committed tiers, FMA buys ≤1.2× on the row-major shapes and nothing on the
+block shapes.** Explicit `#[target_feature(enable = "avx2", enable = "fma")]` kernels, same
+shapes and same accumulation order, tight per-kernel loops (200 warm-up + 2000 iterations,
+the fixture used by `simd/tests.rs`):
+
+| shape | committed AVX2 tier | explicit FMA | ratio |
+|---|--:|--:|--:|
+| 384×1152 row-major | 43.98 µs | 35.93 µs | **1.22×** |
+| 384×1152 block-major | 15.99 | 16.08 | 1.00 (noise) |
+| 384×384 row-major | 13.01 | 11.58 | 1.12× |
+| 384×384 block-major | 4.85 | 4.90 | ~1.00 |
+| 1536×32 row-major | 5.64 | 4.88 | 1.16× |
+| 1536×32 block-major | 1.34 | 1.33 | ~1.00 |
+
+The block-major shape is where the model's GRUs run, and it already issues one load plus one
+mul and one add per group of eight — one µop per eight MACs, which is the 256-bit FP issue
+ceiling of this core. FMA cannot beat that; it only shortens the row-major kernels' op count.
+End to end, six alternating rounds pinned to one core, min of runs: float full frame **159.1
+µs** (committed tiers) vs **160.5 µs** (explicit FMA) — no measurable gain.
+
+Cross-check on a Zen 4 core (Ryzen 7 7800X3D), where a fused op is one 512-bit µop: default
+codegen vs `-C target-cpu=znver4`, two runs each, float full frame **138.7 / 138.8 µs** vs
+**138.2 / 138.6 µs** — no gain there either. Read that as the codegen *around* the tiers,
+since `-C target-cpu` cannot change the hand-written kernels (they use explicit mul and add by
+design); the tier itself is what was measured on Zen 3 above.
+
+**And it costs the parity guarantee.** A fused step does not round the product before the
+add, so the tier cannot be bit-identical to the portable reference: at most 1 ULP per step,
+which on a cancellation-heavy depth-384 synthetic sum measures as ~1000 ULP per element
+(~1e-5 absolute, ~1 LSB on the output samples). It stays inside the parity bound
+(`tests/parity.rs` gives the same numbers with an FMA build), but it weakens the crate's
+headline claim. An FMA tier therefore has to be opt-in, and here it would be an opt-in
+feature for ≤1.2× on the row-major shapes only — not worth a second float ladder. If a core
+clears the ~1.5× bar in the future, it goes in as an optional `fma` Cargo feature,
+runtime-detected like every other tier.
+
+**SSE4.1 is not a float tier at all.** What SSE4.1 adds to these loops is the int8
+`pmovsxbw` widen (int8 tier v2, already shipped). For `f32` it is the same 4-lane width as
+SSE2 — a hand-written SSE4.1 float kernel would be the SSE2 kernel under a different name.
+The float ladder stays SSE2 + AVX2.
+
+## Head-to-head against the pre-SIMD baseline (`74b46b1`)
+
+Means of four alternating rounds on the pinned Zen 3 core, both builds from the same
+toolchain and profile. These are the numbers at `4a26f93`; the block-major change above sits
+on top of them.
+
+| path | metric | `74b46b1` | HEAD (`4a26f93`) | speedup | real-time |
+|---|--:|--:|--:|--:|--:|
+| float | full frame | 305.2 µs | **205.2 µs** | **1.49×** | 32.8× → 48.7× |
+| | front-end | 31.4 | 21.7 | 1.45× | 318× → 461× |
+| | neural net | 273.7 | 183.4 | 1.49× | |
+| int8 | full frame | 509.5 µs | **104.3 µs** | **4.88×** | 19.6× → 95.9× |
+| | front-end | 31.6 | 21.7 | 1.46× | |
+| | neural net | 477.9 | 82.6 | **5.79×** | 20.9× → 121× |
+| legacy | full frame | 40.4 µs | **33.4 µs** | 1.21× | 248× → 299× |
+| | neural net | 21.7 | 16.3 | 1.33× | |
+| | front-end | 18.7 | 17.0 | 1.10× | |
+
+At the baseline the int8 path was *slower* than float (0.58×) because x86 had no
+byte dot kernel; on the branch int8 is 2.0× faster than float. End to end
+(`rnnoise-demo`, 100 s of `test_data/testing.raw` tiled, min of 5 runs each):
+**3.042 s → 2.001 s (1.52×)**, i.e. 301 → 198 µs/frame; the ~5 ms start-up is unchanged.
+
+Per commit (same protocol, two rounds each — approximate, ±5 %):
+
+| commit | float full | float front | float NN | int8 full | what moved |
+|---|--:|--:|--:|--:|---|
+| `74b46b1` | 305 | 31.4 | 274 | 509 | baseline |
+| `b966e6d` | 305 | 31.5 | 274 | 115 | int8 tier ladder |
+| `7014a44` | 264 | 30.2 | 234 | 115 | float dense + xcorr tiers |
+| `389047e` | 221 | 30.0 | 191 | 113 | dense-form loading of complete sparse indices |
+| `d9d1cbc` | 199 | 21.8 | 177 | 101 | FFT butterfly tier |
+| `a3e09ea` | 201 | 21.6 | 180 | 103 | precomputed band weights (~1 µs) |
+| `4a26f93` | 202 | 21.7 | 181 | 103 | docs |
+
+The two builds are not byte-identical to each other, and it is worth stating why: 2 of
+47 520 samples differ by 1 LSB (363 over the 100 s run, because the state carries
+forward). The first divergence in a numeric bisect is the sparse 8×4 commit
+(`ae79ade`, re-landed as `b966e6d`) — it re-grouped the accumulation from a four-term
+chain (`w[r]·x0 + w[8+r]·x1 + …` summed in one expression) to one product per column
+accumulated across the row group, which is the order upstream `vec.h` uses. So the tier is
+bit-identical to the current portable reference (`src/simd/tests.rs` asserts that for every
+tier the CPU reports), while the reference's own grouping changed against the baseline.
+The parity harness reported the same numbers on both builds
+(`samples=47520 nonzero_diff=3 max_diff=1 rel_energy=2.003e-10` at the time, 0 now that the
+pitch feature is computed in double), so nothing regressed.
 
 ## Choosing a configuration
 
-- **Default (float):** highest quality, bit-exact, zero deps, ~32× real time —
+- **Default (float):** highest quality, bit-exact with the C reference built by the pinned
+  recipe, zero deps, ~32× real time on M4 Pro (~63× on the Zen 3 core) —
   fine for real-time on one core with lots of headroom.
-- **int8 (`.quantized()`):** ~3× faster and ~4× smaller, imperceptible quality
-  loss — use it for many concurrent streams, embedded, or battery-sensitive cases.
+- **int8 (`.quantized()`):** ~3× faster than float on aarch64, ~4.9× faster than the
+  pre-SIMD x86 baseline (~2.0× faster than float on this Zen 3 core), ~4× smaller,
+  imperceptible quality loss — use it for many concurrent streams, embedded, or
+  battery-sensitive cases.
 - **legacy (`legacy-model`):** smallest/fastest, lower quality — use only when you
   specifically want the old model's profile.
 
@@ -97,6 +406,14 @@ Fair head-to-head (standalone, isolated processes, median of many runs):
 # current model: float + int8 breakdown (and legacy if the feature is on)
 cargo bench --bench process
 cargo bench --features legacy-model --bench process
+
+# head-to-head against the pre-SIMD baseline: build the baseline in a separate
+# checkout and run both alternately, pinned to one core
+mkdir -p /tmp/baseline && git archive 74b46b1 | tar -x -C /tmp/baseline
+cargo bench --bench process                       # HEAD
+cd /tmp/baseline && cargo bench --bench process   # baseline
+# run them alternately on the same core to keep thermal conditions equal:
+#   taskset -c 2 cargo bench --bench process
 
 # fair, isolated legacy vs nnnoiseless comparison
 cargo run --release --features legacy-model --example bench_legacy
@@ -114,5 +431,15 @@ input) figure so you can separate the NN from the DSP.
 
 See [`BENCHMARKS.md`](../BENCHMARKS.md) §"How to speed up" and
 [`TODO.md`](../TODO.md): x86 VNNI for the int8 kernel, f16 SIMD, multi-threading
-the GEMVs for batch, and a real-input/SIMD FFT for the current model (which would
-relax its bit-exactness bound).
+the GEMVs for batch, and a real-input FFT for the current model (the SIMD tier is done;
+a real-input transform would relax its bit-exactness bound).
+
+Two measured but not yet implemented levers:
+
+- **int8 activations pre-widened to int16.** The AVX2 dot widens `x` inside every row
+  (2 µops per block). Widening once per call instead of once per row gives 7.06 → 6.47 µs
+  per 384×1152 call (+8.4%) on this core, and integer arithmetic makes the two forms
+  identical. It was left out because the `sdot` and VNNI tiers need the byte form, so the
+  kernel would have to carry both.
+- **8-lane butterflies for the FFT.** The tier is 4 lanes (SSE2) and the radix-2 stage is
+  still scalar; an AVX2 version saves roughly 1.5 µs per transform, ~4 µs per frame.
