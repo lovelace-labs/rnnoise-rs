@@ -92,6 +92,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The AVX-512 VNNI kernel subtracted the bias correction over the whole activation vector
   instead of the row length, so layers narrower than the activation vector disagreed with
   the reference.
+- A model blob whose sparse weight index points at an unaligned block or past the layer's
+  inputs is now rejected at load time with the new `ModelError::BadIndex`, as the C
+  reference's `find_idx_check` does. It used to load and then panic inside `process_frame`.
 
 ## [0.1.0]
 

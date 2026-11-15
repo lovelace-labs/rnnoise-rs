@@ -219,6 +219,30 @@ fn sparse_total_blocks(idx: &[i32], nb_outputs: usize) -> Option<usize> {
     Some(total)
 }
 
+/// Check every block position of a sparse `idx` array whose structure
+/// [`sparse_total_blocks`] already accepted (the position half of `find_idx_check`).
+///
+/// A block reads inputs `pos..pos + 4`, so a position must be four-aligned and leave room for
+/// the whole block. Without this a crafted blob loads fine and only fails later, inside
+/// `process_frame`, where it would index past the activation vector on the audio thread.
+fn sparse_positions_valid(idx: &[i32], nb_inputs: usize) -> bool {
+    let mut ii = 0usize;
+    while ii < idx.len() {
+        let nb_blocks = idx[ii] as usize;
+        for &pos in &idx[ii + 1..ii + 1 + nb_blocks] {
+            // Negative positions are rejected too: they would wrap to a huge `usize` in the kernels.
+            let Ok(pos) = usize::try_from(pos) else {
+                return false;
+            };
+            if pos % 4 != 0 || pos + 3 >= nb_inputs {
+                return false;
+            }
+        }
+        ii += 1 + nb_blocks;
+    }
+    true
+}
+
 /// Build one layer from the records named after its base (`linear_init`).
 ///
 /// Every array name derives from the layer's base name, which is what lets the loader
@@ -288,6 +312,9 @@ pub(crate) fn linear(
             .ok_or_else(|| ModelError::BadSize(weights_name.clone()))?;
         if float_weights.len() != 32 * total_blocks {
             return Err(ModelError::BadSize(weights_name));
+        }
+        if !sparse_positions_valid(&idx, nb_inputs) {
+            return Err(ModelError::BadIndex(idx_name));
         }
         Some(idx)
     } else {
@@ -463,6 +490,51 @@ mod tests {
                 matches!(layer.weights, Weights::Q8 { .. }),
                 "int8 records must produce a Q8 layer"
             ),
+        }
+    }
+
+    #[test]
+    fn a_sparse_index_outside_its_layer_is_rejected_at_load() {
+        // One 8×4 block over 8 inputs: only positions 0 and 4 are valid. Anything else used to
+        // load and then index past the activation vector inside `process_frame`.
+        fn le_f32(values: &[f32]) -> Vec<u8> {
+            values.iter().flat_map(|v| v.to_le_bytes()).collect()
+        }
+        let bias = le_f32(&[0.0; 8]);
+        let w = le_f32(&[0.1; 32]);
+        for bad_pos in [2i32, 6, 8, -4] {
+            let idx: Vec<u8> = [1i32, bad_pos]
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect();
+            let arrays = HashMap::from([
+                (
+                    "x_bias",
+                    Array {
+                        kind: WEIGHT_TYPE_FLOAT,
+                        data: &bias,
+                    },
+                ),
+                (
+                    "x_weights_float",
+                    Array {
+                        kind: WEIGHT_TYPE_FLOAT,
+                        data: &w,
+                    },
+                ),
+                (
+                    "x_weights_idx",
+                    Array {
+                        kind: WEIGHT_TYPE_INT32,
+                        data: &idx,
+                    },
+                ),
+            ]);
+            assert_eq!(
+                linear(&arrays, "x", 8, 8).err(),
+                Some(ModelError::BadIndex("x_weights_idx".to_string())),
+                "block position {bad_pos} must be rejected"
+            );
         }
     }
 }

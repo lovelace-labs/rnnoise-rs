@@ -17,6 +17,9 @@ pub enum ModelError {
     BadSize(String),
     /// A weight array has an unexpected record type.
     BadType(String),
+    /// A sparse index array points at an input block outside its layer, or at one that is not
+    /// aligned to the four-input block width.
+    BadIndex(String),
     /// A record, or the `RNNS` container, declares a version this loader does not understand.
     UnsupportedVersion(u32),
     /// The record stream does not hash to the expected checksum — either the container header's
@@ -48,6 +51,7 @@ impl fmt::Display for ModelError {
             ModelError::MissingArray(n) => write!(f, "missing weight array `{n}`"),
             ModelError::BadSize(n) => write!(f, "weight array `{n}` has an unexpected size"),
             ModelError::BadType(n) => write!(f, "weight array `{n}` has an unexpected type"),
+            ModelError::BadIndex(n) => write!(f, "sparse index `{n}` points outside its layer"),
             ModelError::UnsupportedVersion(v) => write!(f, "unsupported model blob version {v}"),
             ModelError::ChecksumMismatch { expected, actual } => {
                 write!(f, "checksum mismatch: expected {expected:#010x}, found {actual:#010x}")
